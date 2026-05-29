@@ -1,0 +1,27 @@
+# Environment & secrets
+.env
+*.env.local
+
+# Database
+data/
+*.db
+*.sqlite
+
+# Logs
+logs/
+*.log
+
+# Dependencies
+node_modules/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Build
+dist/
+build/

@@ -1,0 +1,34 @@
+{
+  "name": "crypto-trading-bot",
+  "version": "1.0.0",
+  "description": "Multi-chain Telegram trading bot with wallet generator, DCA automation, and token swaps",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "nodemon src/index.js",
+    "setup": "node scripts/setup.js"
+  },
+  "dependencies": {
+    "telegraf": "^4.16.3",
+    "ethers": "^6.11.1",
+    "@solana/web3.js": "^1.91.8",
+    "@solana/spl-token": "^0.4.6",
+    "bs58": "^5.0.0",
+    "axios": "^1.6.8",
+    "dotenv": "^16.4.5",
+    "node-cron": "^3.0.3",
+    "better-sqlite3": "^9.4.3",
+    "bip39": "^3.1.0",
+    "hdkey": "^2.1.0",
+    "winston": "^3.12.0",
+    "express": "^4.18.3",
+    "@uniswap/sdk-core": "^5.3.1",
+    "node-fetch": "^2.7.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
