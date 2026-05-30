@@ -1304,15 +1304,20 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b'{"status":"ok","bot":"CryptoBot","running":true}')
 
-    def log_message(self, format, *args):
+    def log_message(self, fmt, *args):
         pass  # Silence access logs
 
 def start_health_server():
+    """Start a tiny HTTP server so Railway health checks pass."""
     port = int(os.environ.get("PORT", 8080))
-    server = HTTPServer(("0.0.0.0", port), HealthHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    print(f"✅ Health check server running on port {port}")
+    try:
+        server = HTTPServer(("0.0.0.0", port), HealthHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        print(f"✅ Health check server on port {port}")
+    except Exception as e:
+        # Non-fatal — bot works fine without it
+        print(f"⚠️  Health server could not start on port {port}: {e}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1320,10 +1325,19 @@ def start_health_server():
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def main():
-    if BOT_TOKEN == "YOUR_TELEGRAM_BOT_TOKEN_HERE":
-        print("❌ ERROR: Add your bot token to config/secrets.py")
-        print("   Or set the BOT_TOKEN environment variable")
-        print("   Get one from @BotFather on Telegram → /newbot")
+    if BOT_TOKEN == "YOUR_TELEGRAM_BOT_TOKEN_HERE" or not BOT_TOKEN:
+        print("=" * 55)
+        print("❌  BOT_TOKEN is not set!")
+        print("=" * 55)
+        print("")
+        print("Railway: Go to your project → service →")
+        print("         Variables tab → add BOT_TOKEN")
+        print("")
+        print("Local:   Edit python_bot/config/secrets.py")
+        print("         and set BOT_TOKEN = 'your_token'")
+        print("")
+        print("Get a token from @BotFather on Telegram → /newbot")
+        print("=" * 55)
         sys.exit(1)
 
     # Start health check server (required for Railway/Render)

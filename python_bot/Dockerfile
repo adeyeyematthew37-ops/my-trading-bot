@@ -1,14 +1,14 @@
 # ─────────────────────────────────────────────────────────────
 #  Dockerfile — CryptoBot Python Telegram Trading Bot
-#  Works on: Railway, Render, DigitalOcean, any VPS, locally
+#  Railway builds this from the repo ROOT, so COPY paths
+#  are relative to the repo root (not this file's location)
 # ─────────────────────────────────────────────────────────────
 
 FROM python:3.11-slim
 
-# Set working directory
 WORKDIR /app
 
-# Install system dependencies
+# System dependencies
 RUN apt-get update && apt-get install -y \
     gcc \
     libssl-dev \
@@ -16,48 +16,34 @@ RUN apt-get update && apt-get install -y \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements first (layer caching — faster rebuilds)
-COPY python_bot/requirements.txt .
-
-# Install Python dependencies
+# Install Python deps first (layer cache — faster rebuilds)
+COPY python_bot/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+    pip install --no-cache-dir -r /app/requirements.txt
 
-# Copy the entire python_bot source
-COPY python_bot/ .
+# Copy all bot source files
+COPY python_bot/ /app/
 
-# Create data directory for SQLite database
+# Persistent data directory for SQLite DB
 RUN mkdir -p /app/data
 
-# ─────────────────────────────────────────────────────────────
-#  ENVIRONMENT VARIABLES
-#  Set these in Railway/Render/your platform dashboard.
-#  DO NOT hardcode secrets here.
+# ── Environment Variables ─────────────────────────────────────
+# Set these in Railway dashboard → Variables tab
 #
-#  Required:
-#    BOT_TOKEN       — from @BotFather on Telegram
+# REQUIRED:
+#   BOT_TOKEN          ← your Telegram bot token from @BotFather
 #
-#  Optional (improves swap routing & price limits):
-#    ONEINCH_API_KEY    — from portal.1inch.dev
-#    COINGECKO_API_KEY  — from coingecko.com/api
-#
-#  Custom RPC URLs (optional, public ones used by default):
-#    ETH_RPC_URL
-#    BSC_RPC_URL
-#    POLYGON_RPC_URL
-#    ARBITRUM_RPC_URL
-#    BASE_RPC_URL
-#    AVAX_RPC_URL
-#    SOLANA_RPC_URL
+# OPTIONAL:
+#   ONEINCH_API_KEY    ← better swap routing (portal.1inch.dev)
+#   COINGECKO_API_KEY  ← higher price rate limits (coingecko.com/api)
+#   ETH_RPC_URL / BSC_RPC_URL / POLYGON_RPC_URL etc
 # ─────────────────────────────────────────────────────────────
 
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV DB_PATH=/app/data/bot.db
+ENV PORT=8080
 
-# Expose nothing — bot uses Telegram polling, no inbound port needed
-# (Railway requires a PORT for health checks, so we expose a dummy one)
 EXPOSE 8080
 
-# Run the bot
-CMD ["python", "bot.py"]
+CMD ["python", "/app/bot.py"]
