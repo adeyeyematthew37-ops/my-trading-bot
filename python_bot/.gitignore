@@ -1,0 +1,24 @@
+# SECRETS — never commit this
+config/secrets.py
+
+# Database — user data stays local
+data/
+*.db
+*.sqlite
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.env
+venv/
+env/
+.venv/
+
+# Logs
+logs/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db

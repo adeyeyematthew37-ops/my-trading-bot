@@ -1,0 +1,11 @@
+python-telegram-bot==22.7
+web3==7.16.0
+eth-account==0.13.7
+bip_utils==2.12.1
+mnemonic==0.21
+solders==0.27.1
+requests==2.32.3
+cryptography==45.0.3
+python-dotenv==1.1.0
+schedule==1.2.2
+aiohttp==3.13.5
