@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # bot.py  —  Full Telegram trading bot
-# Add your token to config/secrets.py — that's the only change needed!
+# Local:   edit config/secrets.py and set BOT_TOKEN
+# Railway: set BOT_TOKEN as an environment variable in the dashboard
 
 import asyncio
 import json
@@ -9,6 +10,7 @@ import os
 import threading
 import time
 from datetime import datetime, timedelta
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 sys.path.insert(0, os.path.dirname(__file__))
 
@@ -1291,11 +1293,41 @@ async def _process_alerts(app: Application):
 #  MAIN
 # ═══════════════════════════════════════════════════════════════════════════════
 
+# ═══════════════════════════════════════════════════════════════════════════════
+#  HEALTH CHECK SERVER — keeps Railway/Render happy
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(b'{"status":"ok","bot":"CryptoBot","running":true}')
+
+    def log_message(self, format, *args):
+        pass  # Silence access logs
+
+def start_health_server():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), HealthHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    print(f"✅ Health check server running on port {port}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  MAIN
+# ═══════════════════════════════════════════════════════════════════════════════
+
 def main():
     if BOT_TOKEN == "YOUR_TELEGRAM_BOT_TOKEN_HERE":
         print("❌ ERROR: Add your bot token to config/secrets.py")
+        print("   Or set the BOT_TOKEN environment variable")
         print("   Get one from @BotFather on Telegram → /newbot")
         sys.exit(1)
+
+    # Start health check server (required for Railway/Render)
+    start_health_server()
 
     db.init_db()
     print("✅ Database initialised")
