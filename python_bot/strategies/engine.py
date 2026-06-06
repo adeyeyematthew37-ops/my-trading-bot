@@ -129,8 +129,28 @@ def get_signal(strategy_name: str, chain: str, token: str, params: dict) -> dict
         return {"signal": "hold", "reason": "No price data available", "indicators": {}}
 
     current_price = price_data["price"]
+    if not current_price or current_price <= 0:
+        return {"signal": "hold", "reason": "Invalid price data", "indicators": {}}
+
     _record_price(chain, token, current_price)
     prices = _get_prices(chain, token, 100)
+
+    # Never fire a signal with fewer than 3 distinct price points
+    # (prevents false RSI=0.0 signals on first run)
+    if len(prices) < 3:
+        return {
+            "signal": "hold",
+            "reason": f"Warming up — collecting price history ({len(prices)}/3 minimum)",
+            "indicators": {"current_price": current_price}
+        }
+
+    # Check prices actually vary (flat line = no real data yet)
+    if len(set(prices)) < 2:
+        return {
+            "signal": "hold",
+            "reason": "Waiting for price movement data",
+            "indicators": {"current_price": current_price}
+        }
 
     indicators = {"current_price": current_price}
 

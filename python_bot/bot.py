@@ -31,7 +31,7 @@ from utils.prices import (
 )
 from wallet.generator import (
     generate_evm_wallet, generate_solana_wallet,
-    evm_from_private_key, solana_from_private_key, short_addr
+    import_wallet, short_addr
 )
 from wallet.balances import get_native_balance, get_solana_balance
 from trading.paper_trade import paper_buy, paper_sell, get_paper_portfolio
@@ -221,20 +221,48 @@ async def gen_wallet_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                    label=f"{chain_info['name']} Wallet", wallet_type=wtype)
 
     # Give paper wallets a starter balance
-    if wtype == "paper":
-        native_sym = chain_info["symbol"]
-        current = db.get_paper_balance(user["id"], native_sym, chain_key)
-        if current == 0:
-            db.set_paper_balance(user["id"], native_sym, chain_key, 1.0)
+    native_sym = chain_info["symbol"]
+    current = db.get_paper_balance(user["id"], native_sym, chain_key)
+    if current == 0:
+        db.set_paper_balance(user["id"], native_sym, chain_key, 1.0)
 
-    mnemonic_line = f"\n\n🔑 *Seed Phrase:*\n`{w['mnemonic']}`" if w.get("mnemonic") else ""
+    is_solana = chain_info["type"] == "solana"
+    mnemonic = w.get("mnemonic", "")
+
+    if is_solana and mnemonic:
+        seed_section = (
+            f"\n\n"
+            f"🔑 *Your 12-Word Seed Phrase:*\n"
+            f"`{mnemonic}`\n\n"
+            f"📲 *Import into Phantom:*\n"
+            f"1\\. Open Phantom → tap the menu ☰\n"
+            f"2\\. Add/Connect Wallet\n"
+            f"3\\. Import Secret Recovery Phrase\n"
+            f"4\\. Enter the 12 words above ✅"
+        )
+    elif mnemonic:
+        seed_section = (
+            f"\n\n"
+            f"🔑 *Seed Phrase \\(save this\\!\\):*\n"
+            f"`{mnemonic}`\n\n"
+            f"📲 Import into MetaMask or Trust Wallet using these words"
+        )
+    else:
+        seed_section = ""
+
     text = (
-        f"✅ *New {chain_info['emoji']} {chain_info['name']} Wallet Created!*\n\n"
+        f"✅ *New {chain_info['emoji']} {chain_info['name']} Wallet Generated\\!*\n\n"
         f"📍 *Address:*\n`{w['address']}`"
-        f"{mnemonic_line}\n\n"
-        f"⚠️ *NEVER share your seed phrase or private key!*\n"
-        f"📝 This is a *paper wallet* — topped up with 1 {chain_info['symbol']} to start.\n"
-        f"Use /topup to add more paper balance, or /fund to deposit real crypto."
+        f"{seed_section}\n\n"
+        f"{'━' * 22}\n"
+        f"⚠️ *SECURITY — READ THIS:*\n"
+        f"• Screenshot or write down the seed phrase\n"
+        f"• Store it offline — never in screenshots or cloud\n"
+        f"• Anyone with these words controls your wallet\n"
+        f"• This message will NOT be shown again\n"
+        f"{'━' * 22}\n\n"
+        f"📝 Started with *1 {native_sym}* paper balance\\.\n"
+        f"Use the menu to top up or start trading\\!"
     )
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("« Back to Wallets", callback_data="menu:wallets")]])
     await send(update, text, kb, edit=True)
@@ -244,41 +272,108 @@ async def import_chain_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chain_key = update.callback_query.data.split(":")[1]
     ctx.user_data["import_chain"] = chain_key
     chain_info = CHAINS.get(chain_key, {})
-    await send(update,
-        f"📥 *Import {chain_info.get('emoji','')} {chain_info.get('name', chain_key)} Wallet*\n\n"
-        f"Send your private key now.\n⚠️ Delete that message after sending!",
-        edit=True)
+    is_solana = chain_info.get("type") == "solana"
+
+    if is_solana:
+        instructions = (
+            f"📥 *Import {chain_info.get('emoji','')} Solana Wallet*\n\n"
+            f"Send any of these formats — the bot auto-detects:\n\n"
+            f"*Option A — Seed Phrase \\(recommended\\)*\n"
+            f"Your 12 or 24 words separated by spaces\n"
+            f"_Works with Phantom, Solflare, Backpack_\n\n"
+            f"*Option B — Private Key \\(base58\\)*\n"
+            f"The long string Phantom exports\n"
+            f"_Phantom: Settings → Security → Export Private Key_\n\n"
+            f"*Option C — Byte Array*\n"
+            f"Format: \\[1,2,3,4,\\.\\.\\.\\]\n"
+            f"_Used by some developer wallets_\n\n"
+            f"{'━'*22}\n"
+            f"⚠️ Send your key now\\. "
+            f"The bot will *immediately delete* your message\\."
+        )
+    else:
+        instructions = (
+            f"📥 *Import {chain_info.get('emoji','')} {chain_info.get('name',chain_key)} Wallet*\n\n"
+            f"Send any of these formats:\n\n"
+            f"*Option A — Private Key*\n"
+            f"64-character hex string \\(with or without 0x\\)\n"
+            f"_MetaMask: Account → Export Private Key_\n\n"
+            f"*Option B — Seed Phrase*\n"
+            f"Your 12 or 24 recovery words\n"
+            f"_MetaMask: Settings → Security → Reveal Phrase_\n\n"
+            f"{'━'*22}\n"
+            f"⚠️ Send your key now\\. "
+            f"The bot will *immediately delete* your message\\."
+        )
+
+    await send(update, instructions, edit=True)
     return AWAIT_IMPORT_KEY
 
 async def import_key_received(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user = ensure_user(update)
     chain_key = ctx.user_data.get("import_chain", "ethereum")
-    pk = update.message.text.strip()
+    key_input = update.message.text.strip()
     chain_info = CHAINS.get(chain_key, {})
 
-    # Delete user message for security
+    # Delete user message immediately for security
     try:
         await update.message.delete()
     except Exception:
         pass
 
+    await update.message.reply_text("⏳ Importing wallet...")
+
     try:
-        if chain_info.get("type") == "solana":
-            w = solana_from_private_key(pk)
-        else:
-            w = evm_from_private_key(pk)
+        w = import_wallet(key_input, chain_info.get("type", "evm"))
         enc_key = encrypt(w["private_key"])
-        db.save_wallet(user["id"], chain_key, w["address"], enc_key,
-                       label=f"Imported {chain_info.get('name', chain_key)}", wallet_type="live")
+        db.save_wallet(
+            user["id"], chain_key, w["address"], enc_key,
+            label=f"Imported {chain_info.get('name', chain_key)}",
+            wallet_type="live"
+        )
+
+        # Show address and fund instructions
+        explorer_url = f"{chain_info.get('explorer','')}/address/{w['address']}"
+        mnemonic_note = ""
+        if w.get("mnemonic"):
+            mnemonic_note = (
+                f"\n\n🔑 *Seed Phrase detected & saved*\n"
+                f"Your wallet was recovered from the seed phrase\\."
+            )
+
+        text = (
+            f"✅ *Wallet Imported as LIVE Wallet\\!*\n\n"
+            f"{chain_info.get('emoji','')} *Chain:* {chain_info.get('name', chain_key)}\n"
+            f"📍 *Address:*\n`{w['address']}`"
+            f"{mnemonic_note}\n\n"
+            f"{'━'*22}\n"
+            f"💎 *This is a LIVE wallet*\n"
+            f"Trades will use real funds on chain\\.\n\n"
+            f"*To fund it:* Send {chain_info.get('symbol','crypto')} to the address above\n"
+            f"*Check balance:* Menu → Balances\n"
+            f"*Start trading:* Menu → Live Trade\n"
+            f"{'━'*22}\n\n"
+            f"⚠️ Your previous message was deleted for security\\."
+        )
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("💰 Check Balance", callback_data="menu:balances")],
+            [InlineKeyboardButton("💎 Start Live Trading", callback_data="menu:live")],
+            [InlineKeyboardButton("« Main Menu", callback_data="back:main")],
+        ])
+        await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN,
+                                        reply_markup=kb)
+
+    except ValueError as e:
         await update.message.reply_text(
-            f"✅ *Wallet Imported as LIVE wallet!*\n\n"
-            f"{chain_info.get('emoji','')} Chain: {chain_info.get('name', chain_key)}\n"
-            f"📍 Address: `{w['address']}`\n\n"
-            f"This is a *live wallet* — trades will use real funds.",
+            f"❌ *Import Failed*\n\n{e}\n\n"
+            f"Try again via Menu → Wallets → Import",
             parse_mode=ParseMode.MARKDOWN
         )
     except Exception as e:
-        await update.message.reply_text(f"❌ Import failed: {e}", parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text(
+            f"❌ *Unexpected error:* `{e}`\n\nPlease try again\\.",
+            parse_mode=ParseMode.MARKDOWN
+        )
 
     return ConversationHandler.END
 
