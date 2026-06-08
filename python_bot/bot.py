@@ -36,7 +36,12 @@ from wallet.generator import (
 from wallet.balances import get_native_balance, get_solana_balance
 from trading.paper_trade import paper_buy, paper_sell, get_paper_portfolio
 from strategies.engine import (
-    STRATEGIES, get_signal, format_signal_message
+    STRATEGIES, get_signal, format_signal_message,
+    format_strategy_description, get_editable_params
+)
+from strategies.learning import (
+    get_strategy_stats, get_weekly_report,
+    get_learning_log, record_trade_outcome
 )
 
 # ── Conversation States ───────────────────────────────────────────────────────
@@ -49,7 +54,8 @@ from strategies.engine import (
     AWAIT_STRATEGY_CHAIN, AWAIT_STRATEGY_TOKEN, AWAIT_STRATEGY_NAME, AWAIT_STRATEGY_MODE,
     AWAIT_ALERT_CHAIN, AWAIT_ALERT_TOKEN, AWAIT_ALERT_COND, AWAIT_ALERT_PRICE,
     AWAIT_SEND_CHAIN, AWAIT_SEND_TO, AWAIT_SEND_AMOUNT,
-) = range(25)
+    AWAIT_PARAM_VALUE,
+) = range(26)
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -867,28 +873,302 @@ async def my_strategies_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user = ensure_user(update)
     strategies = db.get_user_strategies(user["id"])
     if not strategies:
-        await update.message.reply_text("🤖 No strategies running. Use /start → Strategies.")
+        await update.message.reply_text(
+            "🤖 No strategies running\\. Use /start → Strategies to set one up\\.",
+            parse_mode=ParseMode.MARKDOWN
+        )
         return
 
-    text = "🤖 *Your Strategies*\n\n"
+    text = "🤖 *Your Trading Strategies*\n\n"
     buttons = []
-    for s in strategies:
-        status_emoji = {"active": "🟢", "stopped": "🔴", "paused": "⏸"}.get(s["status"], "⚪")
-        mode_tag = "📝" if s["mode"] == "paper" else "💎"
-        ci = CHAINS.get(s["chain"], {})
-        pnl = s.get("pnl", 0)
-        pnl_str = f"+{pnl:.4f}" if pnl >= 0 else f"{pnl:.4f}"
-        text += (
-            f"{status_emoji}{mode_tag} *{STRATEGIES.get(s['name'], {}).get('name', s['name'])}* \\[#{s['id']}\\]\n"
-            f"  {ci.get('emoji','')} {ci.get('name', s['chain'])} — {s.get('token_symbol','TOKEN')}\n"
-            f"  P&L: `{pnl_str}` | Status: {s['status']}\n\n"
-        )
-        if s["status"] == "active":
-            buttons.append([InlineKeyboardButton(f"⏹ Stop #{s['id']}", callback_data=f"stop_strategy:{s['id']}")])
 
+    for s in strategies:
+        stats    = get_strategy_stats(s["id"])
+        s_info   = STRATEGIES.get(s["name"], {})
+        ci       = CHAINS.get(s["chain"], {})
+        status_e = {"active": "🟢", "stopped": "🔴", "paused": "⏸"}.get(s["status"], "⚪")
+        mode_tag = "📝" if s["mode"] == "paper" else "💎"
+
+        # P&L display
+        pnl = stats["total_pnl"]
+        pnl_str = f"{'+'if pnl>=0 else ''}{pnl:.4f}"
+        pnl_emoji = "✅" if pnl >= 0 else "❌"
+
+        # Win rate
+        wr_str = f"{stats['win_rate']*100:.0f}%" if stats["total_trades"] > 0 else "—"
+
+        # Learning log count
+        logs = get_learning_log(s["id"])
+        learned_str = f" 🧠 auto\\-adjusted {len(logs)}x" if logs else ""
+
+        text += (
+            f"{status_e}{mode_tag} *{s_info.get('name', s['name'])}* \\[\\#{s['id']}\\]\n"
+            f"  {ci.get('emoji','')} {ci.get('name',s['chain'])} — "
+            f"*{s.get('token_symbol','?')}*\n"
+            f"  📊 {stats['total_trades']} trades | "
+            f"WR: {wr_str} | "
+            f"{pnl_emoji} P&L: `{pnl_str}`{learned_str}\n"
+        )
+        if stats["total_trades"] > 0:
+            text += (
+                f"  Best: `+{stats['best_trade']:.2f}%` | "
+                f"Worst: `{stats['worst_trade']:.2f}%`\n"
+            )
+        text += "\n"
+
+        row = []
+        if s["status"] == "active":
+            row.append(InlineKeyboardButton(
+                f"⚙️ Edit #{s['id']}", callback_data=f"edit_strat:{s['id']}"
+            ))
+            row.append(InlineKeyboardButton(
+                f"📈 Stats #{s['id']}", callback_data=f"strat_stats:{s['id']}"
+            ))
+            row.append(InlineKeyboardButton(
+                f"⏹ Stop #{s['id']}", callback_data=f"stop_strategy:{s['id']}"
+            ))
+        buttons.append(row)
+
+    buttons.append([InlineKeyboardButton("📊 Weekly Report", callback_data="weekly_report")])
     buttons.append([InlineKeyboardButton("« Back", callback_data="back:main")])
-    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN,
-                                    reply_markup=InlineKeyboardMarkup(buttons))
+
+    await update.message.reply_text(
+        text, parse_mode=ParseMode.MARKDOWN,
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
+
+
+async def strategy_stats_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Show deep stats for a single strategy."""
+    await update.callback_query.answer()
+    sid = int(update.callback_query.data.split(":")[1])
+    strategies = db.get_user_strategies_by_id(sid)
+    if not strategies:
+        await send(update, "❌ Strategy not found\\.", edit=True); return
+
+    s      = strategies[0]
+    stats  = get_strategy_stats(sid)
+    s_info = STRATEGIES.get(s["name"], {})
+    ci     = CHAINS.get(s["chain"], {})
+    logs   = get_learning_log(sid)
+
+    pnl       = stats["total_pnl"]
+    pnl_emoji = "✅" if pnl >= 0 else "❌"
+
+    text = (
+        f"📈 *Strategy Deep Stats* \\[\\#{sid}\\]\n"
+        f"{s_info.get('emoji','')} *{s_info.get('name', s['name'])}*\n"
+        f"{ci.get('emoji','')} {ci.get('name',s['chain'])} — *{s.get('token_symbol','?')}*\n\n"
+        f"{'━'*28}\n"
+        f"📊 *Performance*\n"
+        f"  Total trades: *{stats['total_trades']}*\n"
+        f"  Wins / Losses: *{stats['wins']}W / {stats['losses']}L*\n"
+        f"  Win rate: *{stats['win_rate']*100:.1f}%*\n\n"
+        f"{pnl_emoji} *P&L*\n"
+        f"  Total: `{'+'if pnl>=0 else ''}{pnl:.6f}`\n"
+        f"  Avg win: `+{stats['avg_win']:.2f}%`\n"
+        f"  Avg loss: `{stats['avg_loss']:.2f}%`\n"
+        f"  Best trade: `+{stats['best_trade']:.2f}%`\n"
+        f"  Worst trade: `{stats['worst_trade']:.2f}%`\n\n"
+        f"📐 *Quality Metrics*\n"
+        f"  Profit factor: *{stats['profit_factor']:.2f}x* "
+        f"_\\(>1 = profitable overall\\)_\n"
+        f"  Expectancy: *{stats['expectancy']:+.2f}%* per trade\n\n"
+    )
+
+    if logs:
+        text += f"🧠 *What the Bot Learned \\({len(logs)} adjustments\\)*\n"
+        for log in logs[:3]:
+            adjustments = json.loads(log.get("adjustments") or "[]")
+            for adj in adjustments[:2]:
+                text += f"  • {adj}\n"
+        text += "\n"
+
+    text += f"{'━'*28}"
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("⚙️ Edit Params", callback_data=f"edit_strat:{sid}")],
+        [InlineKeyboardButton("« Back", callback_data="back:main")],
+    ])
+    await send(update, text, kb, edit=True)
+
+
+async def edit_strategy_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Show all editable parameters for a strategy."""
+    await update.callback_query.answer()
+    sid = int(update.callback_query.data.split(":")[1])
+    strategies = db.get_user_strategies_by_id(sid)
+    if not strategies:
+        await send(update, "❌ Strategy not found\\.", edit=True); return
+
+    s       = strategies[0]
+    params  = json.loads(s.get("params") or "{}")
+    s_info  = STRATEGIES.get(s["name"], {})
+    ci      = CHAINS.get(s["chain"], {})
+    ep_list = get_editable_params(s["name"])
+
+    text = (
+        f"⚙️ *Edit Strategy* \\[\\#{sid}\\]\n"
+        f"{s_info.get('emoji','')} *{s_info.get('name', s['name'])}*\n"
+        f"{ci.get('emoji','')} {ci.get('name',s['chain'])} — *{s.get('token_symbol','?')}*\n\n"
+        f"{'━'*28}\n"
+        f"*Current Settings:*\n"
+    )
+    for ep in ep_list:
+        current = params.get(ep["key"], s_info.get("params",{}).get(ep["key"], "?"))
+        text += f"  • {ep['label']}: `{current}`\n"
+
+    text += f"\n_Tap a parameter to change it:_"
+
+    buttons = []
+    for ep in ep_list:
+        current = params.get(ep["key"], s_info.get("params",{}).get(ep["key"], "?"))
+        buttons.append([InlineKeyboardButton(
+            f"✏️ {ep['label']} (now: {current})",
+            callback_data=f"edit_param:{sid}:{ep['key']}"
+        )])
+
+    buttons.append([InlineKeyboardButton("« Back to Stats", callback_data=f"strat_stats:{sid}")])
+    await send(update, text, InlineKeyboardMarkup(buttons), edit=True)
+
+
+async def edit_param_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Show options for editing a specific strategy parameter."""
+    await update.callback_query.answer()
+    parts = update.callback_query.data.split(":")
+    sid, param_key = int(parts[1]), parts[2]
+
+    strategies = db.get_user_strategies_by_id(sid)
+    if not strategies: return
+    s      = strategies[0]
+    params = json.loads(s.get("params") or "{}")
+    s_info = STRATEGIES.get(s["name"], {})
+    ep_list = get_editable_params(s["name"])
+    ep = next((e for e in ep_list if e["key"] == param_key), None)
+    if not ep: return
+
+    current = params.get(param_key, s_info.get("params",{}).get(param_key, "?"))
+
+    ctx.user_data["edit_sid"]   = sid
+    ctx.user_data["edit_param"] = param_key
+
+    text = (
+        f"✏️ *Edit: {ep['label']}*\n\n"
+        f"📖 {ep['desc']}\n\n"
+        f"Current value: `{current}`\n"
+        f"Allowed range: `{ep['min']}` → `{ep['max']}`\n\n"
+    )
+
+    buttons = []
+
+    # Show preset buttons if available
+    presets = ep.get("presets", [])
+    preset_labels = ep.get("preset_labels", [str(p) for p in presets])
+    if presets:
+        text += "*Quick presets:*\n"
+        row = []
+        for p, pl in zip(presets, preset_labels):
+            marker = " ✅" if str(p) == str(current) else ""
+            row.append(InlineKeyboardButton(
+                f"{pl}{marker}", callback_data=f"set_param:{sid}:{param_key}:{p}"
+            ))
+            if len(row) == 3:
+                buttons.append(row); row = []
+        if row:
+            buttons.append(row)
+        text += "\n_Or type a custom value:_"
+    else:
+        text += "_Type your custom value and send it:_"
+
+    buttons.append([InlineKeyboardButton("❌ Cancel", callback_data=f"edit_strat:{sid}")])
+    await send(update, text, InlineKeyboardMarkup(buttons), edit=True)
+    return AWAIT_PARAM_VALUE
+
+
+async def set_param_preset_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Apply a preset param value."""
+    await update.callback_query.answer()
+    parts     = update.callback_query.data.split(":")
+    sid       = int(parts[1])
+    param_key = parts[2]
+    new_val   = parts[3]
+    await _apply_param_change(update, ctx, sid, param_key, new_val)
+    return ConversationHandler.END
+
+
+async def set_param_custom(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Apply a typed custom param value."""
+    sid       = ctx.user_data.get("edit_sid")
+    param_key = ctx.user_data.get("edit_param")
+    if not sid or not param_key:
+        return ConversationHandler.END
+    await _apply_param_change(update, ctx, sid, param_key, update.message.text.strip())
+    return ConversationHandler.END
+
+
+async def _apply_param_change(update, ctx, sid, param_key, raw_value):
+    strategies = db.get_user_strategies_by_id(sid)
+    if not strategies: return
+    s      = strategies[0]
+    params = json.loads(s.get("params") or "{}")
+    s_info = STRATEGIES.get(s["name"], {})
+    ep_list = get_editable_params(s["name"])
+    ep = next((e for e in ep_list if e["key"] == param_key), None)
+    if not ep: return
+
+    try:
+        if ep["type"] == "int":
+            val = int(float(raw_value))
+        else:
+            val = float(raw_value)
+
+        if val < ep["min"] or val > ep["max"]:
+            raise ValueError(f"Must be between {ep['min']} and {ep['max']}")
+
+        params[param_key] = val
+        db.update_strategy_params(sid, params)
+
+        confirm_text = (
+            f"✅ *Setting updated\\!*\n\n"
+            f"*{ep['label']}* changed to `{val}`\n\n"
+            f"The strategy will use this new value from the next trade onwards\\."
+        )
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("⚙️ Edit More Settings", callback_data=f"edit_strat:{sid}")],
+            [InlineKeyboardButton("📈 View Stats", callback_data=f"strat_stats:{sid}")],
+        ])
+        if update.callback_query:
+            await send(update, confirm_text, kb, edit=True)
+        else:
+            await update.message.reply_text(confirm_text, parse_mode=ParseMode.MARKDOWN,
+                                            reply_markup=kb)
+    except ValueError as e:
+        err = f"❌ Invalid value: {e}\\. Please try again\\."
+        if update.callback_query:
+            await send(update, err, edit=True)
+        else:
+            await update.message.reply_text(err, parse_mode=ParseMode.MARKDOWN)
+
+
+async def weekly_report_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Send the weekly performance report."""
+    await update.callback_query.answer()
+    user = ensure_user(update)
+    await send(update, "⏳ Generating your weekly report\\.\\.\\.", edit=True)
+    try:
+        report = get_weekly_report(user["id"])
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data="back:main")]])
+        await send(update, report, kb, edit=True)
+    except Exception as e:
+        await send(update, f"❌ Error generating report: {e}", edit=True)
+
+
+async def weekly_report_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Send weekly report via command."""
+    user = ensure_user(update)
+    await update.message.reply_text("⏳ Generating weekly report...")
+    report = get_weekly_report(user["id"])
+    await update.message.reply_text(report, parse_mode=ParseMode.MARKDOWN)
 
 async def stop_strategy_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
@@ -1250,120 +1530,222 @@ async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 async def run_background_tasks(app: Application):
-    """Runs in a background thread — processes strategies, DCA, and alerts."""
+    """Master background loop — runs every 60 seconds."""
+    tick = 0
     while True:
         try:
             await _process_strategies(app)
             await _process_dca(app)
             await _process_alerts(app)
+
+            # Every 24 hours: clean up old signal messages
+            if tick % 1440 == 0 and tick > 0:
+                await _cleanup_old_messages(app)
+
+            # Every 7 days: send weekly reports
+            if tick % 10080 == 0 and tick > 0:
+                await _send_weekly_reports(app)
+
+            tick += 1
         except Exception as e:
             print(f"[Background] Error: {e}")
-        await asyncio.sleep(60)  # Check every minute
+        await asyncio.sleep(60)
+
 
 async def _process_strategies(app: Application):
-    """Check all active strategies and execute trades if signal fires."""
+    """Check all active strategies, execute trades, record outcomes for learning."""
     strategies = db.get_active_strategies()
     for s in strategies:
         try:
-            params = json.loads(s.get("params") or "{}")
-            signal = get_signal(s["name"], s["chain"], s["token_address"], params)
+            params      = json.loads(s.get("params") or "{}")
+            signal      = get_signal(s["name"], s["chain"], s["token_address"], params)
+            trade_amount = params.get("trade_amount", 0.01)
+            user_id      = s["user_id"]
+            ci           = CHAINS.get(s["chain"], {})
 
             if signal["signal"] == "hold":
                 continue
 
-            trade_amount = params.get("trade_amount", 0.01)
-            user_id = s["user_id"]
-            ci = CHAINS.get(s["chain"], {})
+            result      = None
+            entry_price = signal["indicators"].get("current_price", 0)
 
+            # ── Paper mode ────────────────────────────────────────────────────
             if s["mode"] == "paper":
                 if signal["signal"] == "buy":
                     try:
-                        result = paper_buy(user_id, s["chain"], s["token_address"],
-                                           s.get("token_symbol", "TOKEN"), trade_amount)
-                        pnl_delta = 0
-                    except Exception as e:
+                        result = paper_buy(
+                            user_id, s["chain"], s["token_address"],
+                            s.get("token_symbol", "TOKEN"), trade_amount
+                        )
+                        # Record open trade for PnL tracking
+                        trade_id = db.save_trade({
+                            "user_id":    user_id,
+                            "chain":      s["chain"],
+                            "trade_type": "buy",
+                            "mode":       "paper",
+                            "token_in":   "native",
+                            "token_out":  s["token_address"],
+                            "symbol_in":  ci.get("symbol",""),
+                            "symbol_out": s.get("token_symbol","TOKEN"),
+                            "amount_in":  trade_amount,
+                            "amount_out": result.get("received", 0),
+                            "price_at_trade": entry_price,
+                            "entry_price": entry_price,
+                            "status":     "success",
+                            "strategy":   s["name"],
+                        })
+                    except Exception as ex:
+                        print(f"[Strategy] Paper buy failed: {ex}")
                         result = None
 
                 elif signal["signal"] == "sell":
-                    balance = db.get_paper_balance(user_id, s.get("token_symbol","TOKEN"), s["chain"])
+                    token_sym = s.get("token_symbol", "TOKEN")
+                    balance   = db.get_paper_balance(user_id, token_sym, s["chain"])
                     if balance <= 0:
                         continue
                     try:
-                        result = paper_sell(user_id, s["chain"], s["token_address"],
-                                            s.get("token_symbol","TOKEN"), balance * 0.5)
-                    except Exception:
+                        result = paper_sell(
+                            user_id, s["chain"], s["token_address"],
+                            token_sym, balance * 0.9  # sell 90%
+                        )
+                        exit_price = signal["indicators"].get("current_price", 0)
+
+                        # Find matching buy trade to calculate PnL
+                        recent = db.get_trades(user_id, limit=50, mode="paper")
+                        buy_trade = next(
+                            (t for t in recent
+                             if t["trade_type"] == "buy"
+                             and t.get("token_out") == s["token_address"]
+                             and t.get("strategy") == s["name"]),
+                            None
+                        )
+                        if buy_trade and buy_trade.get("entry_price", 0) > 0:
+                            record_trade_outcome(
+                                strategy_id  = s["id"],
+                                trade_id     = buy_trade["id"],
+                                entry_price  = buy_trade["entry_price"],
+                                exit_price   = exit_price,
+                                amount       = buy_trade.get("amount_out", 0),
+                                signal_data  = signal["indicators"],
+                            )
+
+                        trade_id = db.save_trade({
+                            "user_id":    user_id,
+                            "chain":      s["chain"],
+                            "trade_type": "sell",
+                            "mode":       "paper",
+                            "token_in":   s["token_address"],
+                            "token_out":  "native",
+                            "symbol_in":  token_sym,
+                            "symbol_out": ci.get("symbol",""),
+                            "amount_in":  balance * 0.9,
+                            "amount_out": result.get("received", 0),
+                            "price_at_trade": exit_price,
+                            "exit_price": exit_price,
+                            "status":     "success",
+                            "strategy":   s["name"],
+                        })
+                    except Exception as ex:
+                        print(f"[Strategy] Paper sell failed: {ex}")
                         continue
 
-            # Notify user
-            msg = format_signal_message(s["name"], signal, s.get("token_symbol","TOKEN"),
-                                        s["chain"], s["mode"])
+            # ── Send notification & log message id for cleanup ────────────────
+            msg_text = format_signal_message(
+                s["name"], signal, s.get("token_symbol","TOKEN"),
+                s["chain"], s["mode"]
+            )
             try:
-                await app.bot.send_message(
-                    chat_id=s["tg_id"], text=msg, parse_mode=ParseMode.MARKDOWN
+                sent = await app.bot.send_message(
+                    chat_id=s["tg_id"], text=msg_text,
+                    parse_mode=ParseMode.MARKDOWN
                 )
+                # Log message so we can delete it during daily cleanup
+                db.log_message(s["tg_id"], s["tg_id"], sent.message_id, "signal")
             except Exception:
                 pass
 
         except Exception as e:
             print(f"[Strategy] Error for strategy {s['id']}: {e}")
 
+
 async def _process_dca(app: Application):
+    """Execute due DCA orders."""
     orders = db.get_due_dca_orders()
     for o in orders:
         try:
-            from datetime import datetime, timedelta
-            next_run = (datetime.utcnow() + timedelta(minutes=o["freq_minutes"])).isoformat()
-            done = o["done_orders"] + 1
+            next_run    = (datetime.utcnow() + timedelta(minutes=o["freq_minutes"])).isoformat()
+            done        = o["done_orders"] + 1
             is_complete = o["total_orders"] > 0 and done >= o["total_orders"]
 
             if o["mode"] == "paper":
-                # Paper DCA execution
                 try:
                     result = paper_buy(
                         o["user_id"], o["chain"], o["token_out"],
-                        o.get("symbol_out", "TOKEN"), o["amount_per_order"]
+                        o.get("symbol_out","TOKEN"), o["amount_per_order"]
                     )
+                    db.save_trade({
+                        "user_id":    o["user_id"],
+                        "chain":      o["chain"],
+                        "trade_type": "dca",
+                        "mode":       "paper",
+                        "token_in":   "native",
+                        "token_out":  o["token_out"],
+                        "symbol_in":  o.get("symbol_in",""),
+                        "symbol_out": o.get("symbol_out","TOKEN"),
+                        "amount_in":  o["amount_per_order"],
+                        "amount_out": result.get("received",0),
+                        "price_at_trade": result.get("price",0),
+                        "status": "success",
+                    })
                     status_msg = (
                         f"🤖 *DCA Executed \\#{o['id']}*\n\n"
-                        f"Bought `{result['received']:.6f}` {result['received_symbol']}\n"
-                        f"Spent `{result['spent']} {result['spent_symbol']}`\n"
-                        f"Progress: {done}/{o['total_orders'] if o['total_orders'] > 0 else '∞'}"
+                        f"✅ Bought `{result['received']:.6f}` {result['received_symbol']}\n"
+                        f"💸 Spent `{o['amount_per_order']} {result['spent_symbol']}`\n"
+                        f"💵 Price: {fmt_price(result.get('price'))}\n"
+                        f"📊 Progress: {done}/"
+                        f"{'∞' if o['total_orders']==0 else o['total_orders']}"
                     )
                     if is_complete:
-                        status_msg += "\n\n🎉 DCA order completed!"
+                        status_msg += "\n\n🎉 *DCA order completed\\!*"
                 except Exception as e:
-                    status_msg = f"❌ DCA \\#{o['id']} failed: {e}"
+                    status_msg = f"❌ DCA \\#{o['id']} failed: `{e}`"
 
             db.update_dca(o["id"],
                           done_orders=done,
                           next_run=next_run,
                           status="completed" if is_complete else "active")
             try:
-                await app.bot.send_message(chat_id=o["tg_id"], text=status_msg,
-                                           parse_mode=ParseMode.MARKDOWN)
+                sent = await app.bot.send_message(
+                    chat_id=o["tg_id"], text=status_msg,
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                db.log_message(o["tg_id"], o["tg_id"], sent.message_id, "dca")
             except Exception:
                 pass
         except Exception as e:
             print(f"[DCA] Error for order {o['id']}: {e}")
 
+
 async def _process_alerts(app: Application):
+    """Check price alerts and notify when triggered."""
     alerts = db.get_active_alerts()
     for a in alerts:
         try:
+            native_addr = CHAINS.get(a["chain"], {}).get("native","")
+            cg_id       = CHAINS.get(a["chain"], {}).get("coingecko_id")
+            is_native   = a["token_address"].lower() == native_addr.lower()
+
             if a["chain"] == "solana":
                 pd = get_price_dexscreener("solana", a["token_address"])
+            elif is_native and cg_id:
+                pd = get_price_coingecko(cg_id)
             else:
-                cg_id = CHAINS.get(a["chain"], {}).get("coingecko_id")
-                native_addr = CHAINS.get(a["chain"], {}).get("native", "")
-                if a["token_address"].lower() == native_addr.lower() and cg_id:
-                    pd = get_price_coingecko(cg_id)
-                else:
-                    pd = get_price_dexscreener(a["chain"], a["token_address"])
+                pd = get_price_dexscreener(a["chain"], a["token_address"])
 
             if not pd or not pd.get("price"):
                 continue
 
-            price = pd["price"]
+            price     = pd["price"]
             triggered = (
                 (a["condition"] == "above" and price >= a["target_price"]) or
                 (a["condition"] == "below" and price <= a["target_price"])
@@ -1371,22 +1753,69 @@ async def _process_alerts(app: Application):
             if triggered:
                 db.trigger_alert(a["id"])
                 cond_str = "risen above" if a["condition"] == "above" else "fallen below"
+                ci = CHAINS.get(a["chain"], {})
                 await app.bot.send_message(
                     chat_id=a["tg_id"],
                     text=(
-                        f"🔔 *Price Alert Triggered!*\n\n"
-                        f"*{a.get('token_symbol','Token')}* has {cond_str} "
-                        f"*{fmt_price(a['target_price'])}*\n"
-                        f"Current price: *{fmt_price(price)}*"
+                        f"🔔 *Price Alert Triggered\\!*\n\n"
+                        f"{ci.get('emoji','')} *{a.get('token_symbol','Token')}* "
+                        f"on {ci.get('name', a['chain'])}\n"
+                        f"Price has {cond_str} *{fmt_price(a['target_price'])}*\n"
+                        f"Current price: *{fmt_price(price)}*\n\n"
+                        f"_Alert \\#{a['id']} has been deactivated_"
                     ),
                     parse_mode=ParseMode.MARKDOWN
                 )
         except Exception:
             pass
 
-# ═══════════════════════════════════════════════════════════════════════════════
-#  MAIN
-# ═══════════════════════════════════════════════════════════════════════════════
+
+async def _cleanup_old_messages(app: Application):
+    """
+    Delete signal and DCA notification messages older than 24 hours.
+    Keeps the chat clean — users get a weekly summary instead.
+    """
+    cutoff = (datetime.utcnow() - timedelta(hours=24)).isoformat()
+    old_msgs = db.get_old_messages(cutoff, msg_type="signal")
+    old_msgs += db.get_old_messages(cutoff, msg_type="dca")
+
+    deleted_ids = []
+    for msg in old_msgs:
+        try:
+            await app.bot.delete_message(
+                chat_id=msg["chat_id"],
+                message_id=msg["message_id"]
+            )
+            deleted_ids.append(msg["id"])
+        except Exception:
+            # Message already deleted or too old — still remove from log
+            deleted_ids.append(msg["id"])
+
+    if deleted_ids:
+        db.delete_message_log_entries(deleted_ids)
+        print(f"[Cleanup] Deleted {len(deleted_ids)} old messages")
+
+
+async def _send_weekly_reports(app: Application):
+    """Auto-send weekly reports to all users on Sunday."""
+    from utils.database import get_conn
+    conn = get_conn()
+    users = conn.execute("SELECT * FROM users").fetchall()
+    conn.close()
+
+    for user_row in users:
+        user = dict(user_row)
+        try:
+            report = get_weekly_report(user["id"])
+            sent = await app.bot.send_message(
+                chat_id=user["tg_id"],
+                text=report,
+                parse_mode=ParseMode.MARKDOWN
+            )
+            db.log_message(user["tg_id"], user["tg_id"], sent.message_id, "weekly_report")
+        except Exception as e:
+            print(f"[WeeklyReport] Failed for user {user['tg_id']}: {e}")
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  HEALTH CHECK SERVER — keeps Railway/Render happy
@@ -1400,10 +1829,9 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.wfile.write(b'{"status":"ok","bot":"CryptoBot","running":true}')
 
     def log_message(self, fmt, *args):
-        pass  # Silence access logs
+        pass
 
 def start_health_server():
-    """Start a tiny HTTP server so Railway health checks pass."""
     port = int(os.environ.get("PORT", 8080))
     try:
         server = HTTPServer(("0.0.0.0", port), HealthHandler)
@@ -1411,39 +1839,63 @@ def start_health_server():
         thread.start()
         print(f"✅ Health check server on port {port}")
     except Exception as e:
-        # Non-fatal — bot works fine without it
-        print(f"⚠️  Health server could not start on port {port}: {e}")
+        print(f"⚠️  Health server could not start: {e}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  MAIN
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def main():
+async def cleanup_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Manually trigger a chat cleanup right now."""
+    await update.message.reply_text("🧹 Cleaning up old messages...")
+    cutoff = (datetime.utcnow() - timedelta(hours=24)).isoformat()
+    old_msgs = db.get_old_messages(cutoff, msg_type="signal")
+    old_msgs += db.get_old_messages(cutoff, msg_type="dca")
+    deleted = 0
+    ids_to_remove = []
+    for msg in old_msgs:
+        try:
+            await ctx.bot.delete_message(
+                chat_id=msg["chat_id"],
+                message_id=msg["message_id"]
+            )
+            deleted += 1
+        except Exception:
+            pass
+        ids_to_remove.append(msg["id"])
+    if ids_to_remove:
+        db.delete_message_log_entries(ids_to_remove)
+    await update.message.reply_text(
+        f"✅ *Cleanup done\\!*\n\n"
+        f"Removed {deleted} old signal/DCA messages from chat\\.\n"
+        f"_Auto\\-cleanup runs daily\\. Use /report for your weekly summary\\._",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+
+
     if BOT_TOKEN == "YOUR_TELEGRAM_BOT_TOKEN_HERE" or not BOT_TOKEN:
         print("=" * 55)
         print("❌  BOT_TOKEN is not set!")
         print("=" * 55)
-        print("")
-        print("Railway: Go to your project → service →")
-        print("         Variables tab → add BOT_TOKEN")
-        print("")
-        print("Local:   Edit python_bot/config/secrets.py")
-        print("         and set BOT_TOKEN = 'your_token'")
-        print("")
-        print("Get a token from @BotFather on Telegram → /newbot")
+        print("Railway: Variables tab → add BOT_TOKEN")
+        print("Local:   Edit config/secrets.py")
         print("=" * 55)
         sys.exit(1)
 
-    # Start health check server (required for Railway/Render)
     start_health_server()
 
     db.init_db()
+    try:
+        db.ensure_learning_tables()
+    except Exception:
+        pass  # Tables may already exist
     print("✅ Database initialised")
 
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # Wallet import conversation
+    # ── Conversation: wallet import ───────────────────────────────────────────
     import_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(import_chain_callback, pattern="^import_chain:")],
         states={AWAIT_IMPORT_KEY: [MessageHandler(filters.TEXT & ~filters.COMMAND, import_key_received)]},
@@ -1451,12 +1903,12 @@ def main():
         per_message=False,
     )
 
-    # Top-up conversation
+    # ── Conversation: paper top-up ────────────────────────────────────────────
     topup_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(topup_start, pattern="^topup:start$")],
         states={
-            AWAIT_TOPUP_CHAIN:  [CallbackQueryHandler(topup_chain_selected, pattern="^topup_chain:")],
-            AWAIT_TOPUP_ASSET:  [CallbackQueryHandler(topup_asset_selected, pattern="^topup_asset:")],
+            AWAIT_TOPUP_CHAIN:  [CallbackQueryHandler(topup_chain_selected,  pattern="^topup_chain:")],
+            AWAIT_TOPUP_ASSET:  [CallbackQueryHandler(topup_asset_selected,  pattern="^topup_asset:")],
             AWAIT_TOPUP_AMOUNT: [
                 CallbackQueryHandler(topup_amount_selected, pattern="^topup_amt:"),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, topup_custom_received),
@@ -1466,7 +1918,7 @@ def main():
         per_message=False,
     )
 
-    # Strategy setup conversation
+    # ── Conversation: strategy setup ──────────────────────────────────────────
     strategy_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(strategy_select_callback, pattern="^strategy_select:")],
         states={
@@ -1478,42 +1930,59 @@ def main():
         per_message=False,
     )
 
-    # Register handlers
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_cmd))
-    app.add_handler(CommandHandler("price", price_cmd))
-    app.add_handler(CommandHandler("alert", alert_cmd))
-    app.add_handler(CommandHandler("alerts", lambda u, c: alerts_menu(u, c)))
-    app.add_handler(CommandHandler("pbuy", pbuy_cmd))
-    app.add_handler(CommandHandler("psell", psell_cmd))
-    app.add_handler(CommandHandler("portfolio", lambda u, c: (
-        ensure_user(u),
-        asyncio.ensure_future(u.message.reply_text(
-            "📊 Use /start → Paper Trade → Portfolio", parse_mode=ParseMode.MARKDOWN
-        ))
-    )))
-    app.add_handler(CommandHandler("newdca", newdca_cmd))
-    app.add_handler(CommandHandler("dcalist", lambda u, c: dca_menu(u, c)))
-    app.add_handler(CommandHandler("mystrats", my_strategies_cmd))
+    # ── Conversation: edit strategy param ─────────────────────────────────────
+    edit_param_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(edit_param_callback, pattern="^edit_param:")],
+        states={
+            AWAIT_PARAM_VALUE: [
+                CallbackQueryHandler(set_param_preset_callback, pattern="^set_param:"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, set_param_custom),
+            ],
+        },
+        fallbacks=[CallbackQueryHandler(cancel_callback, pattern="^cancel$")],
+        per_message=False,
+    )
 
+    # ── Commands ──────────────────────────────────────────────────────────────
+    app.add_handler(CommandHandler("start",      start))
+    app.add_handler(CommandHandler("help",       help_cmd))
+    app.add_handler(CommandHandler("price",      price_cmd))
+    app.add_handler(CommandHandler("alert",      alert_cmd))
+    app.add_handler(CommandHandler("alerts",     lambda u,c: alerts_menu(u,c)))
+    app.add_handler(CommandHandler("pbuy",       pbuy_cmd))
+    app.add_handler(CommandHandler("psell",      psell_cmd))
+    app.add_handler(CommandHandler("portfolio",  lambda u,c: paper_menu(u,c)))
+    app.add_handler(CommandHandler("newdca",     newdca_cmd))
+    app.add_handler(CommandHandler("dcalist",    lambda u,c: dca_menu(u,c)))
+    app.add_handler(CommandHandler("mystrats",   my_strategies_cmd))
+    app.add_handler(CommandHandler("report",     weekly_report_cmd))
+    app.add_handler(CommandHandler("cleanup",    cleanup_cmd))
+
+    # ── Conversations (must come before generic callback handlers) ────────────
     app.add_handler(import_conv)
     app.add_handler(topup_conv)
     app.add_handler(strategy_conv)
+    app.add_handler(edit_param_conv)
 
-    app.add_handler(CallbackQueryHandler(start, pattern="^back:main$"))
-    app.add_handler(CallbackQueryHandler(menu_callback, pattern="^menu:"))
-    app.add_handler(CallbackQueryHandler(wallet_callback, pattern="^wallet:"))
-    app.add_handler(CallbackQueryHandler(gen_wallet_callback, pattern="^gen_wallet:"))
-    app.add_handler(CallbackQueryHandler(paper_trade_callback, pattern="^ptrade:"))
-    app.add_handler(CallbackQueryHandler(fund_start, pattern="^fund:start$"))
-    app.add_handler(CallbackQueryHandler(dca_list_callback, pattern="^dca_list$"))
-    app.add_handler(CallbackQueryHandler(cancel_dca_callback, pattern="^cancel_dca:"))
-    app.add_handler(CallbackQueryHandler(cancel_alert_callback, pattern="^cancel_alert:"))
-    app.add_handler(CallbackQueryHandler(stop_strategy_callback, pattern="^stop_strategy:"))
+    # ── Callback buttons ──────────────────────────────────────────────────────
+    app.add_handler(CallbackQueryHandler(start,                    pattern="^back:main$"))
+    app.add_handler(CallbackQueryHandler(menu_callback,            pattern="^menu:"))
+    app.add_handler(CallbackQueryHandler(wallet_callback,          pattern="^wallet:"))
+    app.add_handler(CallbackQueryHandler(gen_wallet_callback,      pattern="^gen_wallet:"))
+    app.add_handler(CallbackQueryHandler(paper_trade_callback,     pattern="^ptrade:"))
+    app.add_handler(CallbackQueryHandler(fund_start,               pattern="^fund:start$"))
+    app.add_handler(CallbackQueryHandler(dca_list_callback,        pattern="^dca_list$"))
+    app.add_handler(CallbackQueryHandler(cancel_dca_callback,      pattern="^cancel_dca:"))
+    app.add_handler(CallbackQueryHandler(cancel_alert_callback,    pattern="^cancel_alert:"))
+    app.add_handler(CallbackQueryHandler(stop_strategy_callback,   pattern="^stop_strategy:"))
     app.add_handler(CallbackQueryHandler(strategy_select_callback, pattern="^strategy_select:"))
-    app.add_handler(CallbackQueryHandler(cancel_callback, pattern="^cancel$"))
+    app.add_handler(CallbackQueryHandler(strategy_stats_callback,  pattern="^strat_stats:"))
+    app.add_handler(CallbackQueryHandler(edit_strategy_callback,   pattern="^edit_strat:"))
+    app.add_handler(CallbackQueryHandler(set_param_preset_callback,pattern="^set_param:"))
+    app.add_handler(CallbackQueryHandler(weekly_report_callback,   pattern="^weekly_report$"))
+    app.add_handler(CallbackQueryHandler(cancel_callback,          pattern="^cancel$"))
 
-    # Start background task loop
+    # ── Background loop ───────────────────────────────────────────────────────
     async def post_init(application: Application):
         asyncio.create_task(run_background_tasks(application))
 
@@ -1525,3 +1994,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

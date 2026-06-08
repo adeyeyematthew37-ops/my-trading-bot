@@ -454,3 +454,167 @@ def set_enc_key(key_hex: str):
     )
     conn.commit()
     conn.close()
+
+# ── Trade Outcomes (for learning engine) ─────────────────────────────────────
+
+def ensure_learning_tables():
+    """Add learning tables if they don't exist yet (safe to call multiple times)."""
+    conn = get_conn()
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS trade_outcomes (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        strategy_id  INTEGER NOT NULL,
+        trade_id     INTEGER,
+        entry_price  REAL NOT NULL,
+        exit_price   REAL NOT NULL,
+        amount       REAL NOT NULL,
+        pnl_pct      REAL NOT NULL,
+        pnl_abs      REAL NOT NULL,
+        won          INTEGER NOT NULL,
+        signal_data  TEXT DEFAULT '{}',
+        created_at   TEXT DEFAULT (datetime('now')),
+        FOREIGN KEY (strategy_id) REFERENCES strategies(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS learning_logs (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        strategy_id   INTEGER NOT NULL,
+        win_rate      REAL,
+        avg_win_pct   REAL,
+        avg_loss_pct  REAL,
+        adjustments   TEXT DEFAULT '[]',
+        params_before TEXT DEFAULT '{}',
+        params_after  TEXT DEFAULT '{}',
+        created_at    TEXT DEFAULT (datetime('now')),
+        FOREIGN KEY (strategy_id) REFERENCES strategies(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS message_log (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        tg_id       TEXT NOT NULL,
+        chat_id     TEXT NOT NULL,
+        message_id  INTEGER NOT NULL,
+        msg_type    TEXT DEFAULT 'signal',
+        created_at  TEXT DEFAULT (datetime('now'))
+    );
+
+    ALTER TABLE trades ADD COLUMN pnl_abs REAL DEFAULT 0.0;
+    ALTER TABLE trades ADD COLUMN entry_price REAL DEFAULT 0.0;
+    ALTER TABLE trades ADD COLUMN exit_price  REAL DEFAULT 0.0;
+    """)
+    conn.commit()
+    conn.close()
+
+def save_trade_outcome(data: dict):
+    conn = get_conn()
+    conn.execute("""
+        INSERT INTO trade_outcomes
+        (strategy_id, trade_id, entry_price, exit_price, amount,
+         pnl_pct, pnl_abs, won, signal_data)
+        VALUES (?,?,?,?,?,?,?,?,?)
+    """, (
+        data["strategy_id"], data.get("trade_id"),
+        data["entry_price"],  data["exit_price"], data["amount"],
+        data["pnl_pct"],      data["pnl_abs"],    data["won"],
+        data.get("signal_data", "{}")
+    ))
+    conn.commit()
+    conn.close()
+
+def get_strategy_outcomes(strategy_id: int) -> list:
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT * FROM trade_outcomes WHERE strategy_id=? ORDER BY created_at ASC",
+        (strategy_id,)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+def save_learning_log(data: dict):
+    conn = get_conn()
+    conn.execute("""
+        INSERT INTO learning_logs
+        (strategy_id, win_rate, avg_win_pct, avg_loss_pct,
+         adjustments, params_before, params_after)
+        VALUES (?,?,?,?,?,?,?)
+    """, (
+        data["strategy_id"], data["win_rate"],
+        data["avg_win_pct"], data["avg_loss_pct"],
+        data["adjustments"], data["params_before"], data["params_after"]
+    ))
+    conn.commit()
+    conn.close()
+
+def get_learning_logs(strategy_id: int) -> list:
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT * FROM learning_logs WHERE strategy_id=? ORDER BY created_at DESC LIMIT 20",
+        (strategy_id,)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+def update_strategy_params(strategy_id: int, new_params: dict):
+    conn = get_conn()
+    conn.execute(
+        "UPDATE strategies SET params=? WHERE id=?",
+        (json.dumps(new_params), strategy_id)
+    )
+    conn.commit()
+    conn.close()
+
+def get_user_strategies_by_id(strategy_id: int) -> list:
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT * FROM strategies WHERE id=?", (strategy_id,)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+def get_trades_since(user_id: int, since_iso: str) -> list:
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT * FROM trades WHERE user_id=? AND created_at >= ? ORDER BY created_at DESC",
+        (user_id, since_iso)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+# ── Message Log (for cleanup) ─────────────────────────────────────────────────
+
+def log_message(tg_id: str, chat_id: str, message_id: int, msg_type: str = "signal"):
+    conn = get_conn()
+    conn.execute(
+        "INSERT INTO message_log (tg_id, chat_id, message_id, msg_type) VALUES (?,?,?,?)",
+        (str(tg_id), str(chat_id), message_id, msg_type)
+    )
+    conn.commit()
+    conn.close()
+
+def get_old_messages(older_than_iso: str, msg_type: str = None) -> list:
+    conn = get_conn()
+    q = "SELECT * FROM message_log WHERE created_at < ?"
+    params = [older_than_iso]
+    if msg_type:
+        q += " AND msg_type=?"; params.append(msg_type)
+    rows = conn.execute(q, params).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+def delete_message_log_entries(ids: list):
+    if not ids:
+        return
+    conn = get_conn()
+    placeholders = ",".join("?" * len(ids))
+    conn.execute(f"DELETE FROM message_log WHERE id IN ({placeholders})", ids)
+    conn.commit()
+    conn.close()
+
+def get_last_weekly_report(tg_id: str):
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT * FROM message_log WHERE tg_id=? AND msg_type='weekly_report' ORDER BY created_at DESC LIMIT 1",
+        (str(tg_id),)
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
