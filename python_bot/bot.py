@@ -1874,7 +1874,7 @@ async def cleanup_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
 
-
+def main():
     if BOT_TOKEN == "YOUR_TELEGRAM_BOT_TOKEN_HERE" or not BOT_TOKEN:
         print("=" * 55)
         print("❌  BOT_TOKEN is not set!")

@@ -66,6 +66,9 @@ def init_db():
         amount_in       REAL,
         amount_out      REAL,
         price_at_trade  REAL,
+        entry_price     REAL DEFAULT 0.0,
+        exit_price      REAL DEFAULT 0.0,
+        pnl_abs         REAL DEFAULT 0.0,
         tx_hash         TEXT,
         status          TEXT DEFAULT 'pending',
         strategy        TEXT,
@@ -458,8 +461,10 @@ def set_enc_key(key_hex: str):
 # ── Trade Outcomes (for learning engine) ─────────────────────────────────────
 
 def ensure_learning_tables():
-    """Add learning tables if they don't exist yet (safe to call multiple times)."""
+    """Add learning tables and columns. Safe to call multiple times — never crashes on restart."""
     conn = get_conn()
+
+    # Create tables (IF NOT EXISTS is safe)
     conn.executescript("""
     CREATE TABLE IF NOT EXISTS trade_outcomes (
         id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -497,12 +502,23 @@ def ensure_learning_tables():
         msg_type    TEXT DEFAULT 'signal',
         created_at  TEXT DEFAULT (datetime('now'))
     );
-
-    ALTER TABLE trades ADD COLUMN pnl_abs REAL DEFAULT 0.0;
-    ALTER TABLE trades ADD COLUMN entry_price REAL DEFAULT 0.0;
-    ALTER TABLE trades ADD COLUMN exit_price  REAL DEFAULT 0.0;
     """)
     conn.commit()
+
+    # Add columns to trades table — each wrapped in try/except so
+    # restarts never crash even if columns already exist
+    new_columns = [
+        ("pnl_abs",      "REAL DEFAULT 0.0"),
+        ("entry_price",  "REAL DEFAULT 0.0"),
+        ("exit_price",   "REAL DEFAULT 0.0"),
+    ]
+    for col_name, col_def in new_columns:
+        try:
+            conn.execute(f"ALTER TABLE trades ADD COLUMN {col_name} {col_def}")
+            conn.commit()
+        except Exception:
+            pass  # Column already exists — safe to ignore
+
     conn.close()
 
 def save_trade_outcome(data: dict):
