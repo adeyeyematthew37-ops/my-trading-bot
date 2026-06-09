@@ -37,7 +37,8 @@ from wallet.balances import get_native_balance, get_solana_balance
 from trading.paper_trade import paper_buy, paper_sell, get_paper_portfolio
 from strategies.engine import (
     STRATEGIES, get_signal, format_signal_message,
-    format_strategy_description, get_editable_params
+    format_strategy_description, get_editable_params,
+    on_trade_executed
 )
 from strategies.learning import (
     get_strategy_stats, get_weekly_report,
@@ -754,19 +755,26 @@ async def strategies_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = (
         f"🤖 *Trading Strategies*\n\n"
         f"Active bots: *{active_count}*\n\n"
-        f"Choose a strategy to run automatically:\n\n"
+        f"Tap any strategy to see a full plain\\-English explanation "
+        f"and set it up:\n\n"
     )
-    for key, s in STRATEGIES.items():
-        text += f"• *{s['name']}* — {s['description'][:50]}...\n"
-        text += f"  Risk: {s['risk']} | {s['best_for']}\n\n"
+    # Two strategies per row to keep the button list compact
+    keys  = list(STRATEGIES.keys())
+    rows  = []
+    for i in range(0, len(keys), 2):
+        row = []
+        for key in keys[i:i+2]:
+            s = STRATEGIES[key]
+            row.append(InlineKeyboardButton(
+                f"{s['emoji']} {s['name']}", callback_data=f"strategy_select:{key}"
+            ))
+        rows.append(row)
 
-    rows = []
-    for key, s in STRATEGIES.items():
-        rows.append([InlineKeyboardButton(
-            f"▶️ {s['name']}", callback_data=f"strategy_select:{key}"
-        )])
     if active:
-        rows.append([InlineKeyboardButton("📋 My Running Strategies", callback_data="strategy_list")])
+        rows.append([InlineKeyboardButton(
+            f"📋 My Running Strategies ({active_count})",
+            callback_data="strategy_list"
+        )])
     rows.append([InlineKeyboardButton("« Back", callback_data="back:main")])
 
     await send(update, text, InlineKeyboardMarkup(rows), edit=True)
@@ -776,17 +784,27 @@ async def strategy_select_callback(update: Update, ctx: ContextTypes.DEFAULT_TYP
     strategy_key = update.callback_query.data.split(":")[1]
     s = STRATEGIES.get(strategy_key)
     if not s:
+        await send(update, "❌ Strategy not found\\.", edit=True)
         return
 
     ctx.user_data["strategy_key"] = strategy_key
+
+    # Show plain-English description with default params filled in
+    native_sym = "ETH"  # generic for description preview
+    desc = format_strategy_description(strategy_key, s["params"], native_sym)
+
     text = (
-        f"🤖 *{s['name']}*\n\n"
-        f"📖 {s['description']}\n\n"
-        f"⚙️ Default params:\n"
-        + "\n".join(f"  • `{k}`: `{v}`" for k, v in s["params"].items()) +
-        f"\n\n🔗 Select chain:"
+        f"{s['emoji']} *{s['name']}*\n"
+        f"_Risk: {s['risk']} · Best for: {s['best_for']}_\n\n"
+        f"{desc}\n\n"
+        f"{'━'*28}\n"
+        f"Select a chain to continue:"
     )
-    await send(update, text, chain_keyboard("strategy_chain"), edit=True)
+
+    kb = chain_keyboard("strategy_chain",
+        extra_row=[InlineKeyboardButton("« Back to Strategies", callback_data="menu:strategies")]
+    )
+    await send(update, text, kb, edit=True)
     return AWAIT_STRATEGY_CHAIN
 
 async def strategy_chain_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1176,8 +1194,125 @@ async def stop_strategy_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE)
     user = ensure_user(update)
     db.stop_strategy(sid, user["id"])
     await update.callback_query.edit_message_text(
-        f"⏹ Strategy \\#{sid} stopped.", parse_mode=ParseMode.MARKDOWN
+        f"⏹ Strategy \\#{sid} stopped\\.", parse_mode=ParseMode.MARKDOWN
     )
+
+async def strategy_list_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Show running strategies from the strategies menu."""
+    await update.callback_query.answer()
+    # Re-use my_strategies_cmd logic but as inline
+    user = ensure_user(update)
+    strategies = db.get_user_strategies(user["id"])
+    if not strategies:
+        await send(update, "🤖 No strategies running yet\\.\nUse the Strategies menu to set one up\\!", edit=True)
+        return
+    # Build same text as my_strategies_cmd but send inline
+    text = "📋 *Running Strategies*\n\n"
+    buttons = []
+    for s in strategies:
+        stats    = get_strategy_stats(s["id"])
+        s_info   = STRATEGIES.get(s["name"], {})
+        ci       = CHAINS.get(s["chain"], {})
+        status_e = {"active": "🟢", "stopped": "🔴", "paused": "⏸"}.get(s["status"], "⚪")
+        mode_tag = "📝" if s["mode"] == "paper" else "💎"
+        pnl      = stats["total_pnl"]
+        pnl_str  = f"{'+'if pnl>=0 else ''}{pnl:.4f}"
+        wr_str   = f"{stats['win_rate']*100:.0f}%" if stats["total_trades"] > 0 else "—"
+        text += (
+            f"{status_e}{mode_tag} *{s_info.get('name', s['name'])}* \\[\\#{s['id']}\\]\n"
+            f"  {ci.get('emoji','')} {ci.get('name',s['chain'])} — *{s.get('token_symbol','?')}*\n"
+            f"  {stats['total_trades']} trades | WR: {wr_str} | P&L: `{pnl_str}`\n\n"
+        )
+        row = []
+        if s["status"] == "active":
+            row.append(InlineKeyboardButton(f"📈 Stats", callback_data=f"strat_stats:{s['id']}"))
+            row.append(InlineKeyboardButton(f"⚙️ Edit",  callback_data=f"edit_strat:{s['id']}"))
+            row.append(InlineKeyboardButton(f"⏹ Stop",  callback_data=f"stop_strategy:{s['id']}"))
+            buttons.append(row)
+    buttons.append([InlineKeyboardButton("« Back to Strategies", callback_data="menu:strategies")])
+    await send(update, text, InlineKeyboardMarkup(buttons), edit=True)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  RESET COMMAND — user-controlled, never automatic
+# ═══════════════════════════════════════════════════════════════════════════════
+
+async def reset_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Show reset options — user must explicitly choose what to wipe."""
+    text = (
+        "🔄 *Reset Data*\n\n"
+        "⚠️ Choose what to reset\\. "
+        "This cannot be undone\\.\n\n"
+        "Your strategies and wallets are *never* touched by updates — "
+        "only you can reset them here\\."
+    )
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📝 Reset Paper Balance Only",  callback_data="reset:paper")],
+        [InlineKeyboardButton("📜 Clear Trade History",       callback_data="reset:trades")],
+        [InlineKeyboardButton("🤖 Stop & Delete All Strategies", callback_data="reset:strategies")],
+        [InlineKeyboardButton("📊 Cancel All DCA Orders",    callback_data="reset:dca")],
+        [InlineKeyboardButton("🔔 Cancel All Alerts",        callback_data="reset:alerts")],
+        [InlineKeyboardButton("☢️ FULL RESET (wipe everything)", callback_data="reset:all")],
+        [InlineKeyboardButton("❌ Cancel — keep everything", callback_data="back:main")],
+    ])
+    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+
+async def reset_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Handle reset confirmation."""
+    await update.callback_query.answer()
+    what = update.callback_query.data.split(":")[1]
+
+    labels = {
+        "paper":      "paper balance",
+        "trades":     "trade history",
+        "strategies": "all strategies and learning data",
+        "dca":        "all DCA orders",
+        "alerts":     "all price alerts",
+        "all":        "EVERYTHING",
+    }
+    label = labels.get(what, what)
+
+    # First tap shows confirmation
+    confirm_key = f"reset_confirmed_{what}"
+    if not ctx.user_data.get(confirm_key):
+        ctx.user_data[confirm_key] = True
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"✅ Yes, reset {label}", callback_data=f"reset_confirm:{what}")],
+            [InlineKeyboardButton("❌ No, cancel", callback_data="back:main")],
+        ])
+        await send(update,
+            f"⚠️ *Are you sure?*\n\n"
+            f"This will permanently delete your *{label}*\\.\n\n"
+            f"Tap confirm to proceed:",
+            kb, edit=True)
+        return
+
+async def reset_confirm_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Execute the reset after double-confirmation."""
+    await update.callback_query.answer()
+    what  = update.callback_query.data.split(":")[1]
+    user  = ensure_user(update)
+    wiped = db.reset_user_data(user["id"], [what])
+
+    labels = {
+        "paper":      "📝 Paper balance reset to zero",
+        "trades":     "📜 Trade history cleared",
+        "strategies": "🤖 All strategies stopped and deleted",
+        "dca":        "📊 All DCA orders cancelled",
+        "alerts":     "🔔 All price alerts removed",
+        "all":        "☢️ Full reset complete",
+    }
+    msg = labels.get(what, f"Reset: {what}")
+
+    # Clear any confirmation state
+    for key in list(ctx.user_data.keys()):
+        if key.startswith("reset_confirmed_"):
+            del ctx.user_data[key]
+
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("« Main Menu", callback_data="back:main")]])
+    await send(update,
+        f"✅ *Done\\!*\n\n{msg}\\.\n\n"
+        f"_Your other data is untouched\\._",
+        kb, edit=True)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  DCA BOTS
@@ -1558,7 +1693,7 @@ async def _process_strategies(app: Application):
     for s in strategies:
         try:
             params      = json.loads(s.get("params") or "{}")
-            signal      = get_signal(s["name"], s["chain"], s["token_address"], params)
+            signal      = get_signal(s["name"], s["chain"], s["token_address"], params, strategy_id=s["id"])
             trade_amount = params.get("trade_amount", 0.01)
             user_id      = s["user_id"]
             ci           = CHAINS.get(s["chain"], {})
@@ -1577,7 +1712,7 @@ async def _process_strategies(app: Application):
                             user_id, s["chain"], s["token_address"],
                             s.get("token_symbol", "TOKEN"), trade_amount
                         )
-                        # Record open trade for PnL tracking
+                        on_trade_executed(s["id"], "buy", entry_price)
                         trade_id = db.save_trade({
                             "user_id":    user_id,
                             "chain":      s["chain"],
@@ -1608,6 +1743,7 @@ async def _process_strategies(app: Application):
                             user_id, s["chain"], s["token_address"],
                             token_sym, balance * 0.9  # sell 90%
                         )
+                        on_trade_executed(s["id"], "sell", signal["indicators"].get("current_price", 0))
                         exit_price = signal["indicators"].get("current_price", 0)
 
                         # Find matching buy trade to calculate PnL
@@ -1957,6 +2093,7 @@ def main():
     app.add_handler(CommandHandler("mystrats",   my_strategies_cmd))
     app.add_handler(CommandHandler("report",     weekly_report_cmd))
     app.add_handler(CommandHandler("cleanup",    cleanup_cmd))
+    app.add_handler(CommandHandler("reset",      reset_cmd))
 
     # ── Conversations (must come before generic callback handlers) ────────────
     app.add_handler(import_conv)
@@ -1975,11 +2112,14 @@ def main():
     app.add_handler(CallbackQueryHandler(cancel_dca_callback,      pattern="^cancel_dca:"))
     app.add_handler(CallbackQueryHandler(cancel_alert_callback,    pattern="^cancel_alert:"))
     app.add_handler(CallbackQueryHandler(stop_strategy_callback,   pattern="^stop_strategy:"))
+    app.add_handler(CallbackQueryHandler(strategy_list_callback,   pattern="^strategy_list$"))
     app.add_handler(CallbackQueryHandler(strategy_select_callback, pattern="^strategy_select:"))
     app.add_handler(CallbackQueryHandler(strategy_stats_callback,  pattern="^strat_stats:"))
     app.add_handler(CallbackQueryHandler(edit_strategy_callback,   pattern="^edit_strat:"))
     app.add_handler(CallbackQueryHandler(set_param_preset_callback,pattern="^set_param:"))
     app.add_handler(CallbackQueryHandler(weekly_report_callback,   pattern="^weekly_report$"))
+    app.add_handler(CallbackQueryHandler(reset_callback,           pattern="^reset:"))
+    app.add_handler(CallbackQueryHandler(reset_confirm_callback,   pattern="^reset_confirm:"))
     app.add_handler(CallbackQueryHandler(cancel_callback,          pattern="^cancel$"))
 
     # ── Background loop ───────────────────────────────────────────────────────

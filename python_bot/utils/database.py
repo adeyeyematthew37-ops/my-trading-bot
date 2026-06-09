@@ -5,7 +5,11 @@ import json
 import os
 from datetime import datetime
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "bot.db")
+# Respect DB_PATH env var so Railway volume keeps data across deploys.
+# Set DB_PATH=/data/bot.db in Railway Variables, then add a Volume
+# mounted at /data — that's the only thing needed for persistence.
+_default_path = os.path.join(os.path.dirname(__file__), "..", "data", "bot.db")
+DB_PATH = os.environ.get("DB_PATH", _default_path)
 
 def get_conn():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
@@ -634,3 +638,55 @@ def get_last_weekly_report(tg_id: str):
     ).fetchone()
     conn.close()
     return dict(row) if row else None
+
+# ── User Reset (manual only — triggered by /reset command) ───────────────────
+
+def reset_user_data(user_id: int, what: list):
+    """
+    Selectively wipe a user's data. 'what' is a list of keys:
+    'paper'      — paper balances only
+    'trades'     — trade history
+    'strategies' — stop and delete all strategies + learning data
+    'dca'        — cancel all DCA orders
+    'alerts'     — cancel all alerts
+    'wallets'    — delete all wallets (DANGEROUS)
+    'all'        — everything above
+    """
+    conn = get_conn()
+    targets = set(what)
+    if "all" in targets:
+        targets = {"paper","trades","strategies","dca","alerts","wallets"}
+
+    if "paper" in targets:
+        conn.execute("DELETE FROM paper_balances WHERE user_id=?", (user_id,))
+
+    if "trades" in targets:
+        conn.execute("DELETE FROM trades WHERE user_id=?", (user_id,))
+        conn.execute(
+            "DELETE FROM trade_outcomes WHERE strategy_id IN "
+            "(SELECT id FROM strategies WHERE user_id=?)", (user_id,)
+        )
+
+    if "strategies" in targets:
+        conn.execute(
+            "DELETE FROM learning_logs WHERE strategy_id IN "
+            "(SELECT id FROM strategies WHERE user_id=?)", (user_id,)
+        )
+        conn.execute(
+            "DELETE FROM trade_outcomes WHERE strategy_id IN "
+            "(SELECT id FROM strategies WHERE user_id=?)", (user_id,)
+        )
+        conn.execute("DELETE FROM strategies WHERE user_id=?", (user_id,))
+
+    if "dca" in targets:
+        conn.execute("DELETE FROM dca_orders WHERE user_id=?", (user_id,))
+
+    if "alerts" in targets:
+        conn.execute("DELETE FROM price_alerts WHERE user_id=?", (user_id,))
+
+    if "wallets" in targets:
+        conn.execute("DELETE FROM wallets WHERE user_id=?", (user_id,))
+
+    conn.commit()
+    conn.close()
+    return list(targets)
