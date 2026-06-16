@@ -690,3 +690,115 @@ def reset_user_data(user_id: int, what: list):
     conn.commit()
     conn.close()
     return list(targets)
+
+# ── Open Positions (tracks every active buy for real PnL) ─────────────────────
+
+def ensure_positions_table():
+    """Create open_positions table — safe to call multiple times."""
+    conn = get_conn()
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS open_positions (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id         INTEGER NOT NULL,
+        strategy_id     INTEGER,
+        chain           TEXT NOT NULL,
+        mode            TEXT DEFAULT 'paper',
+        token_address   TEXT NOT NULL,
+        token_symbol    TEXT,
+        qty             REAL NOT NULL,
+        entry_price_usd REAL NOT NULL,
+        entry_native    REAL NOT NULL,
+        entry_usd       REAL NOT NULL,
+        current_price   REAL DEFAULT 0.0,
+        status          TEXT DEFAULT 'open',
+        opened_at       TEXT DEFAULT (datetime('now')),
+        closed_at       TEXT,
+        realized_pnl    REAL DEFAULT 0.0,
+        FOREIGN KEY (user_id) REFERENCES users(id)
+    );
+    """)
+    conn.commit()
+    conn.close()
+
+def open_position(data: dict) -> int:
+    conn = get_conn()
+    r = conn.execute("""
+        INSERT INTO open_positions
+        (user_id, strategy_id, chain, mode, token_address, token_symbol,
+         qty, entry_price_usd, entry_native, entry_usd)
+        VALUES (?,?,?,?,?,?,?,?,?,?)
+    """, (
+        data["user_id"], data.get("strategy_id"), data["chain"], data.get("mode","paper"),
+        data["token_address"], data.get("token_symbol","?"),
+        data["qty"], data["entry_price_usd"], data["entry_native"], data["entry_usd"]
+    ))
+    conn.commit()
+    pos_id = r.lastrowid
+    conn.close()
+    return pos_id
+
+def close_position(position_id: int, exit_price_usd: float, realized_pnl: float):
+    conn = get_conn()
+    conn.execute("""
+        UPDATE open_positions
+        SET status='closed', closed_at=datetime('now'),
+            current_price=?, realized_pnl=?
+        WHERE id=?
+    """, (exit_price_usd, realized_pnl, position_id))
+    conn.commit()
+    conn.close()
+
+def update_position_price(position_id: int, current_price: float):
+    conn = get_conn()
+    conn.execute("UPDATE open_positions SET current_price=? WHERE id=?",
+                 (current_price, position_id))
+    conn.commit()
+    conn.close()
+
+def get_open_positions(user_id: int, strategy_id: int = None) -> list:
+    conn = get_conn()
+    if strategy_id:
+        rows = conn.execute(
+            "SELECT * FROM open_positions WHERE user_id=? AND strategy_id=? AND status='open'",
+            (user_id, strategy_id)
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM open_positions WHERE user_id=? AND status='open' ORDER BY opened_at DESC",
+            (user_id,)
+        ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+def get_all_positions(user_id: int, limit: int = 30) -> list:
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT * FROM open_positions WHERE user_id=? ORDER BY opened_at DESC LIMIT ?",
+        (user_id, limit)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+def get_strategy_positions(strategy_id: int) -> list:
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT * FROM open_positions WHERE strategy_id=? ORDER BY opened_at DESC",
+        (strategy_id,)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+def get_realized_pnl(user_id: int, strategy_id: int = None) -> float:
+    conn = get_conn()
+    if strategy_id:
+        row = conn.execute(
+            "SELECT SUM(realized_pnl) as total FROM open_positions WHERE user_id=? AND strategy_id=? AND status='closed'",
+            (user_id, strategy_id)
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT SUM(realized_pnl) as total FROM open_positions WHERE user_id=? AND status='closed'",
+            (user_id,)
+        ).fetchone()
+    conn.close()
+    return row["total"] or 0.0

@@ -700,3 +700,317 @@ def format_strategy_description(strategy_key, params, native_symbol="ETH"):
 
 def get_editable_params(strategy_key):
     return STRATEGIES.get(strategy_key, {}).get("editable_params", [])
+
+# ── ADDITIONAL STRATEGIES (appended) ─────────────────────────────────────────
+# These are added to the STRATEGIES dict at module load
+
+_EXTRA_STRATEGIES = {
+
+    "compound_scalper": {
+        "name": "Compound Scalper 💰",
+        "emoji": "💰",
+        "short_desc": "Reinvests every profit to grow a small balance exponentially",
+        "plain_english": (
+            "🤔 *What does this do?*\n"
+            "This is specifically designed to grow a tiny balance like $1 into more\\. "
+            "It makes small, quick trades and reinvests every single profit — "
+            "so gains compound on top of gains\\. "
+            "Think of it as a snowball rolling downhill getting bigger\\.\n\n"
+            "📈 *Buys when:* Price dips *{dip_pct}%* below its recent average "
+            "AND volume is active \\(token is being traded\\)\n\n"
+            "📉 *Sells when:* Price is *{profit_pct}%* above entry — takes profit fast\n\n"
+            "💰 *Starts with:* `{trade_amount} {native_symbol}`\n"
+            "_Each win automatically increases the next trade size slightly_\n\n"
+            "⚠️ Risk: Medium\\-Low — designed for gradual compounding\\. "
+            "Best on Solana or BSC where fees are tiny\\."
+        ),
+        "params": {
+            "trade_amount": 0.01,
+            "dip_pct":      0.5,
+            "profit_pct":   1.0,
+            "lookback":     8,
+            "compound":     True,
+        },
+        "editable_params": [
+            {"key": "trade_amount", "label": "💰 Starting amount",
+             "desc": "Your starting trade size — can be very small", "type": "float",
+             "min": 0.0001, "max": 100.0, "step": 0.001},
+            {"key": "profit_pct", "label": "✅ Profit target %",
+             "desc": "Take profit at this % gain. Smaller = more frequent wins. Default: 1%",
+             "type": "float", "min": 0.2, "max": 5.0, "step": 0.1,
+             "presets": [0.3, 0.5, 1.0, 1.5, 2.0]},
+            {"key": "dip_pct", "label": "📉 Buy dip %",
+             "desc": "Buy when price drops this % below average. Default: 0.5%",
+             "type": "float", "min": 0.1, "max": 3.0, "step": 0.1,
+             "presets": [0.2, 0.3, 0.5, 0.8, 1.0]},
+        ],
+        "risk": "Medium-Low", "best_for": "Growing tiny balances, Solana/BSC",
+    },
+
+    "volume_surge": {
+        "name": "Volume Surge Hunter 📡",
+        "emoji": "📡",
+        "short_desc": "Finds tokens with exploding volume before price spikes",
+        "plain_english": (
+            "🤔 *What does this do?*\n"
+            "Volume always moves before price\\. When a token suddenly gets "
+            "{volume_multiplier}x more trades than usual, something is happening — "
+            "news, influencer post, whale buying\\. "
+            "This bot detects that volume explosion early and gets in before "
+            "the price catches up\\.\n\n"
+            "📈 *Buys when:* Recent price movement is *{volume_multiplier}x* "
+            "bigger than the token's normal movement AND price is rising\n"
+            "_Volume spike = someone is accumulating = price usually follows_\n\n"
+            "📉 *Sells when:* Price gains *{take_profit_pct}%* from entry\n"
+            "_Takes quick profit as early buyers and retail FOMO in_\n\n"
+            "💰 *Spends per trade:* `{trade_amount} {native_symbol}`\n\n"
+            "⚠️ Risk: High — volume surges can be fake pumps\\. "
+            "Always use with rug check and keep size small\\."
+        ),
+        "params": {
+            "trade_amount":       0.005,
+            "volume_multiplier":  3.0,
+            "take_profit_pct":    8.0,
+            "stop_loss_pct":      4.0,
+            "lookback":           15,
+        },
+        "editable_params": [
+            {"key": "trade_amount", "label": "💰 Amount per buy",
+             "desc": "Keep small due to high risk", "type": "float",
+             "min": 0.001, "max": 50.0, "step": 0.001},
+            {"key": "volume_multiplier", "label": "📡 Volume spike multiplier",
+             "desc": "How many times bigger than normal the move must be. Default: 3x",
+             "type": "float", "min": 1.5, "max": 8.0, "step": 0.5,
+             "presets": [2.0, 2.5, 3.0, 4.0, 5.0]},
+            {"key": "take_profit_pct", "label": "✅ Take profit %",
+             "desc": "Sell when up this % from entry. Default: 8%",
+             "type": "float", "min": 2.0, "max": 30.0, "step": 1.0,
+             "presets": [3.0, 5.0, 8.0, 10.0, 15.0]},
+            {"key": "stop_loss_pct", "label": "🛑 Stop loss %",
+             "desc": "Exit if down this % — limits losses. Default: 4%",
+             "type": "float", "min": 1.0, "max": 15.0, "step": 0.5,
+             "presets": [2.0, 3.0, 4.0, 5.0, 8.0]},
+        ],
+        "risk": "High", "best_for": "Meme coins, trending tokens",
+    },
+
+    "safe_accumulator": {
+        "name": "Safe Accumulator 🛡️",
+        "emoji": "🛡️",
+        "short_desc": "Slowly builds a position with multiple safety checks — lowest risk",
+        "plain_english": (
+            "🤔 *What does this do?*\n"
+            "This is the safest strategy for growing $1\\. "
+            "It never puts all money in at once — it splits your budget into "
+            "{num_buys} smaller buys, only adding more if the price stays healthy\\. "
+            "It uses three confirming signals before buying anything\\.\n\n"
+            "📈 *Buys when ALL THREE are true:*\n"
+            "1\\. RSI is below {rsi_max} \\(not overbought\\)\n"
+            "2\\. Price is above its {trend_ma}\\-period average \\(uptrend\\)\n"
+            "3\\. We have not already used all {num_buys} buy slots\n\n"
+            "📉 *Sells when:* Up *{take_profit_pct}%* from average entry price\n\n"
+            "💰 *Spends per buy:* `{trade_amount} {native_symbol}` "
+            "\\(maximum {num_buys} buys total\\)\n\n"
+            "⚠️ Risk: Low — triple\\-checked entries, small sizes, "
+            "never chases pumps\\. Best for stable tokens with real volume\\."
+        ),
+        "params": {
+            "trade_amount":    0.005,
+            "num_buys":        3,
+            "rsi_max":         55,
+            "trend_ma":        20,
+            "take_profit_pct": 5.0,
+        },
+        "editable_params": [
+            {"key": "trade_amount", "label": "💰 Amount per buy",
+             "desc": "Each individual buy size — multiplied by num_buys for total exposure",
+             "type": "float", "min": 0.0001, "max": 50.0, "step": 0.001},
+            {"key": "num_buys", "label": "🔢 Max number of buys",
+             "desc": "How many times to buy before stopping. Default: 3",
+             "type": "int", "min": 1, "max": 10, "step": 1,
+             "presets": [1, 2, 3, 5, 10]},
+            {"key": "take_profit_pct", "label": "✅ Take profit %",
+             "desc": "Sell when up this % from average cost. Default: 5%",
+             "type": "float", "min": 1.0, "max": 20.0, "step": 0.5,
+             "presets": [2.0, 3.0, 5.0, 8.0, 10.0]},
+            {"key": "rsi_max", "label": "📊 Max RSI to buy",
+             "desc": "Don't buy if RSI is above this — avoids overbought entries",
+             "type": "int", "min": 30, "max": 70, "step": 5,
+             "presets": [40, 45, 50, 55, 60]},
+        ],
+        "risk": "Low", "best_for": "Growing $1 safely, beginners",
+    },
+
+    "sandwich_dca": {
+        "name": "Sandwich DCA 🥪",
+        "emoji": "🥪",
+        "short_desc": "Buys dips and sells bounces in a repeating cycle",
+        "plain_english": (
+            "🤔 *What does this do?*\n"
+            "Combines two simple ideas: buy the dip \\(like DCA\\) "
+            "AND sell the bounce \\(like a range trader\\)\\. "
+            "It keeps cycling — buy low, sell a bit higher, buy the next dip, "
+            "sell the next bounce — forever\\. Each cycle turns a small profit\\.\n\n"
+            "📈 *Buys when:* Price drops *{buy_dip_pct}%* below the recent average\n\n"
+            "📉 *Sells when:* Price is *{sell_rise_pct}%* above the recent average\n\n"
+            "💰 *Spends per trade:* `{trade_amount} {native_symbol}`\n\n"
+            "🔄 *Cycle time:* Checks every {check_minutes} minutes\n\n"
+            "⚠️ Risk: Low\\-Medium — simple and mechanical\\. "
+            "Works well on tokens that trade sideways with small up/down waves\\."
+        ),
+        "params": {
+            "trade_amount":   0.01,
+            "buy_dip_pct":    1.5,
+            "sell_rise_pct":  1.5,
+            "lookback":       12,
+            "check_minutes":  5,
+        },
+        "editable_params": [
+            {"key": "trade_amount", "label": "💰 Amount per trade",
+             "desc": "How much to spend on each buy cycle", "type": "float",
+             "min": 0.001, "max": 100.0, "step": 0.005},
+            {"key": "buy_dip_pct", "label": "📉 Buy when price drops %",
+             "desc": "Buy when this % below average. Default: 1.5%",
+             "type": "float", "min": 0.3, "max": 5.0, "step": 0.1,
+             "presets": [0.5, 1.0, 1.5, 2.0, 3.0]},
+            {"key": "sell_rise_pct", "label": "📈 Sell when price rises %",
+             "desc": "Sell when this % above average. Default: 1.5%",
+             "type": "float", "min": 0.3, "max": 5.0, "step": 0.1,
+             "presets": [0.5, 1.0, 1.5, 2.0, 3.0]},
+        ],
+        "risk": "Low-Medium", "best_for": "Ranging tokens, steady compounding",
+    },
+}
+
+# Merge extra strategies into the main dict
+STRATEGIES.update(_EXTRA_STRATEGIES)
+
+# Add signal logic for new strategies
+_ORIG_GET_SIGNAL = get_signal
+
+def get_signal(strategy_name: str, chain: str, token: str,
+               params: dict, strategy_id: int = None) -> dict:
+    """Extended signal generator — handles new strategies then falls back to original."""
+
+    price_data = get_token_price(chain, token)
+    if not price_data or not price_data.get("price"):
+        return {"signal": "hold", "reason": "No price data", "indicators": {}}
+    current = price_data["price"]
+    if not current or current <= 0:
+        return {"signal": "hold", "reason": "Invalid price", "indicators": {}}
+
+    _record_price(chain, token, current)
+    prices = _get_prices(chain, token, 100)
+    ind = {"current_price": current}
+
+    if len(prices) < 3 or len(set(prices)) < 2:
+        return {"signal": "hold",
+                "reason": f"Warming up ({len(prices)}/3 data points)",
+                "indicators": ind}
+
+    # ── Compound Scalper ──────────────────────────────────────────────────────
+    if strategy_name == "compound_scalper":
+        lb      = params.get("lookback", 8)
+        avg     = calc_sma(prices, min(lb, len(prices)))
+        ind["sma"] = avg
+        if avg is None:
+            return {"signal": "hold", "reason": f"Collecting data", "indicators": ind}
+        pct = ((current - avg) / avg) * 100
+        ind["pct_from_avg"] = pct
+        dip = params.get("dip_pct", 0.5)
+        if pct <= -dip:
+            return {"signal": "buy",
+                    "reason": f"Compound buy: {pct:.2f}% below avg — dip detected",
+                    "indicators": ind}
+        if strategy_id and strategy_id in _entry_prices:
+            entry = _entry_prices[strategy_id]
+            gain  = ((current - entry) / entry) * 100
+            if gain >= params.get("profit_pct", 1.0):
+                return {"signal": "sell",
+                        "reason": f"Compound profit taken: +{gain:.2f}%",
+                        "indicators": ind}
+        return {"signal": "hold",
+                "reason": f"Waiting for {dip}% dip (now {pct:+.2f}%)",
+                "indicators": ind}
+
+    # ── Volume Surge ──────────────────────────────────────────────────────────
+    elif strategy_name == "volume_surge":
+        lb    = params.get("lookback", 15)
+        spike = calc_volume_spike(prices, lb)
+        sma5  = calc_sma(prices, 5)
+        ind.update({"spike_ratio": spike, "sma5": sma5})
+        if spike is None:
+            return {"signal": "hold", "reason": f"Collecting data ({len(prices)}/{lb+1})", "indicators": ind}
+        mult = params.get("volume_multiplier", 3.0)
+        if spike >= mult and current > (sma5 or current):
+            return {"signal": "buy",
+                    "reason": f"📡 Volume surge! {spike:.1f}x normal + upward price",
+                    "indicators": ind}
+        if strategy_id and strategy_id in _entry_prices:
+            entry = _entry_prices[strategy_id]
+            gain  = ((current - entry) / entry) * 100
+            loss  = gain
+            if gain >= params.get("take_profit_pct", 8.0):
+                return {"signal": "sell",
+                        "reason": f"Volume surge profit: +{gain:.1f}%",
+                        "indicators": ind}
+            if loss <= -params.get("stop_loss_pct", 4.0):
+                return {"signal": "sell",
+                        "reason": f"Stop loss hit: {loss:.1f}%",
+                        "indicators": ind}
+        return {"signal": "hold",
+                "reason": f"Surge: {spike:.1f}x (need {mult}x)",
+                "indicators": ind}
+
+    # ── Safe Accumulator ──────────────────────────────────────────────────────
+    elif strategy_name == "safe_accumulator":
+        rsi   = calc_rsi(prices, 14)
+        trend = calc_sma(prices, params.get("trend_ma", 20))
+        ind.update({"rsi": rsi, "trend_ma": trend})
+        if rsi is None or trend is None:
+            return {"signal": "hold", "reason": f"Collecting data ({len(prices)} points)", "indicators": ind}
+        rsi_ok   = rsi < params.get("rsi_max", 55)
+        trend_ok = current > trend
+        if rsi_ok and trend_ok:
+            return {"signal": "buy",
+                    "reason": f"Safe entry: RSI={rsi:.0f}<{params.get('rsi_max',55)}, above {params.get('trend_ma',20)}-MA",
+                    "indicators": ind}
+        if strategy_id and strategy_id in _entry_prices:
+            entry = _entry_prices[strategy_id]
+            gain  = ((current - entry) / entry) * 100
+            if gain >= params.get("take_profit_pct", 5.0):
+                return {"signal": "sell",
+                        "reason": f"Safe profit: +{gain:.1f}%",
+                        "indicators": ind}
+        reasons = []
+        if not rsi_ok:   reasons.append(f"RSI={rsi:.0f} too high")
+        if not trend_ok: reasons.append("below trend MA")
+        return {"signal": "hold",
+                "reason": "Waiting: " + ", ".join(reasons),
+                "indicators": ind}
+
+    # ── Sandwich DCA ──────────────────────────────────────────────────────────
+    elif strategy_name == "sandwich_dca":
+        lb  = params.get("lookback", 12)
+        avg = calc_sma(prices, min(lb, len(prices)))
+        ind["sma"] = avg
+        if avg is None:
+            return {"signal": "hold", "reason": "Collecting data", "indicators": ind}
+        pct = ((current - avg) / avg) * 100
+        ind["pct_from_avg"] = pct
+        buy_dip  = -params.get("buy_dip_pct", 1.5)
+        sell_rse =  params.get("sell_rise_pct", 1.5)
+        if pct <= buy_dip:
+            return {"signal": "buy",
+                    "reason": f"Sandwich DCA buy: {pct:.2f}% below avg",
+                    "indicators": ind}
+        if pct >= sell_rse:
+            return {"signal": "sell",
+                    "reason": f"Sandwich DCA sell: +{pct:.2f}% above avg",
+                    "indicators": ind}
+        return {"signal": "hold",
+                "reason": f"Between bands ({pct:+.2f}%) — watching",
+                "indicators": ind}
+
+    # ── Fall back to original signal function ─────────────────────────────────
+    return _ORIG_GET_SIGNAL(strategy_name, chain, token, params, strategy_id)

@@ -27,14 +27,17 @@ from utils import database as db
 from utils.encryption import encrypt, decrypt
 from utils.prices import (
     get_native_prices, get_token_price, get_price_coingecko,
-    get_price_dexscreener, search_token, fmt_price, fmt_change
+    get_price_dexscreener, search_token, fmt_price, fmt_change,
+    get_token_full_info, rug_check, fmt_mcap, get_chart_url
 )
 from wallet.generator import (
     generate_evm_wallet, generate_solana_wallet,
     import_wallet, short_addr
 )
 from wallet.balances import get_native_balance, get_solana_balance
-from trading.paper_trade import paper_buy, paper_sell, get_paper_portfolio
+from trading.paper_trade import (
+    paper_buy, paper_sell, get_paper_portfolio, get_unrealized_pnl
+)
 from strategies.engine import (
     STRATEGIES, get_signal, format_signal_message,
     format_strategy_description, get_editable_params,
@@ -614,6 +617,403 @@ async def paper_trade_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 #  /pbuy and /psell commands
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  TOKEN PANEL — Fluxbot-style trade interface
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _token_panel_keyboard(chain: str, token: str, mode: str = "paper") -> InlineKeyboardMarkup:
+    """Build the Fluxbot-style trade panel keyboard."""
+    chart_url = get_chart_url(chain, token)
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📈 Chart",    url=chart_url),
+            InlineKeyboardButton("🕵️ RugCheck", callback_data=f"rugcheck:{chain}:{token}"),
+            InlineKeyboardButton("❌ Close",    callback_data="back:main"),
+        ],
+        [InlineKeyboardButton(f"⇅ ── SWAP MODE ── ⇅", callback_data="noop")],
+        [
+            InlineKeyboardButton("🟢 Buy",  callback_data=f"tp_buy:{chain}:{token}:{mode}"),
+            InlineKeyboardButton("⚫ Sell", callback_data=f"tp_sell:{chain}:{token}:{mode}"),
+        ],
+        [InlineKeyboardButton("💵 ── AMOUNT ── 💵", callback_data="noop")],
+        [
+            InlineKeyboardButton("0.1",    callback_data=f"tp_amt:{chain}:{token}:{mode}:buy:0.1"),
+            InlineKeyboardButton("0.5",    callback_data=f"tp_amt:{chain}:{token}:{mode}:buy:0.5"),
+            InlineKeyboardButton("1",      callback_data=f"tp_amt:{chain}:{token}:{mode}:buy:1"),
+        ],
+        [
+            InlineKeyboardButton("5",      callback_data=f"tp_amt:{chain}:{token}:{mode}:buy:5"),
+            InlineKeyboardButton("10",     callback_data=f"tp_amt:{chain}:{token}:{mode}:buy:10"),
+            InlineKeyboardButton("Custom", callback_data=f"tp_custom:{chain}:{token}:{mode}:buy"),
+        ],
+        [InlineKeyboardButton("🔄 Refresh", callback_data=f"tp_refresh:{chain}:{token}:{mode}")],
+    ])
+
+
+async def _build_token_panel_text(chain: str, token: str, user_id: int, mode: str = "paper") -> str:
+    """Build the Fluxbot-style token info panel text."""
+    ci = CHAINS.get(chain, {})
+    info = get_token_full_info(chain, token)
+
+    if not info:
+        return (
+            f"{'━'*28}\n"
+            f"{ci.get('emoji','')} *Token Panel*\n"
+            f"Chain: {ci.get('name', chain)}\n"
+            f"Contract: `{token[:12]}\.\.\. `\n\n"
+            f"⚠️ Could not fetch token data\. Check contract address\."
+        )
+
+    sym      = info["base_symbol"]
+    name     = info["base_name"]
+    price    = info["price"]
+    mcap     = info["mcap"]
+    vol24    = info["volume24h"]
+    liq      = info["liquidity"]
+    ch5m     = info["change5m"]
+    ch1h     = info["change1h"]
+    ch24     = info["change24h"]
+    buys     = info["buys24h"]
+    sells    = info["sells24h"]
+    dex      = info["dex"]
+    age_h    = info["age_hours"]
+
+    # Age display
+    if age_h is not None:
+        if age_h < 1:    age_str = f"{age_h*60:.0f}m old"
+        elif age_h < 24: age_str = f"{age_h:.1f}h old"
+        else:            age_str = f"{age_h/24:.1f}d old"
+    else:
+        age_str = "age unknown"
+
+    # Buy/sell pressure
+    total_txns = buys + sells
+    if total_txns > 0:
+        buy_pct = buys / total_txns * 100
+        pressure = f"🟢 {buy_pct:.0f}% buys" if buy_pct > 55 else f"🔴 {100-buy_pct:.0f}% sells"
+    else:
+        pressure = "No txns"
+
+    # Paper balance check
+    bal = db.get_paper_balance(user_id, sym.upper(), chain)
+    bal_usd = bal * price if price > 0 else 0
+
+    mode_tag = "📝 Paper" if mode == "paper" else "💎 Live"
+
+    # Unrealized PnL for this token
+    positions = db.get_open_positions(user_id)
+    token_pos = [p for p in positions if p["token_address"].lower() == token.lower()]
+    pnl_line = ""
+    if token_pos:
+        pos = token_pos[0]
+        if pos["entry_price_usd"] > 0:
+            pnl_pct = ((price - pos["entry_price_usd"]) / pos["entry_price_usd"]) * 100
+            pnl_usd = (price - pos["entry_price_usd"]) * pos["qty"]
+            pnl_e   = "✅" if pnl_usd >= 0 else "❌"
+            pnl_line = (
+                f"\n{pnl_e} *Unrealized P&L:* "
+                f"`{'+'if pnl_usd>=0 else ''}{pnl_usd:.4f}` "
+                f"\({'+' if pnl_pct>=0 else ''}{pnl_pct:.2f}%\)"
+            )
+
+    text = (
+        f"{'━'*28}\n"
+        f"{ci.get('emoji','')} *{name}* \| {sym} \| {mode_tag}\n\n"
+        f"💵 *Price:* `{fmt_price(price)}`\n"
+        f"📊 *MCap:* `{fmt_mcap(mcap)}`\n"
+        f"📦 *Vol 24h:* `{fmt_mcap(vol24)}`\n"
+        f"💧 *Liquidity:* `{fmt_mcap(liq)}`\n"
+        f"🔀 *DEX:* {dex} \| _{age_str}_\n\n"
+        f"📈 *Price Change:*\n"
+        f"  5m: `{'+'if ch5m>=0 else ''}{ch5m:.2f}%` \| "
+        f"1h: `{'+'if ch1h>=0 else ''}{ch1h:.2f}%` \| "
+        f"24h: `{'+'if ch24>=0 else ''}{ch24:.2f}%`\n\n"
+        f"💱 *Txns:* {buys} buys / {sells} sells — {pressure}\n\n"
+        f"👛 *Your Balance:* `{bal:.6f} {sym}` \(≈${bal_usd:.4f}\)"
+        f"{pnl_line}\n"
+        f"{'━'*28}"
+    )
+    return text
+
+
+
+async def rugcheck_standalone_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """/rugcheck [chain] [address] — Run a rug pull risk check on any token."""
+    args = ctx.args
+    if len(args) < 2:
+        await update.message.reply_text(
+            "🕵️ *Rug Check*\n\nUsage: `/rugcheck [chain] [address]`\n\n"
+            "Example: `/rugcheck solana TokenMintAddress`",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    chain_key, token = args[0].lower(), args[1]
+    await update.message.reply_text("⏳ Running rug check...")
+    result = rug_check(chain_key, token)
+    ci     = CHAINS.get(chain_key, {})
+    lines  = [
+        f"🕵️ *Rug Check — {ci.get('name', chain_key)}*",
+        f"📍 `{token[:20]}...`",
+        f"",
+        f"*Risk Score: {result['score']}*",
+        f"",
+    ]
+    for w in result["warnings"]:
+        lines.append(f"  {w}")
+    info = result.get("info", {})
+    if info:
+        lines += [
+            f"",
+            f"💧 Liquidity: `{fmt_mcap(info.get('liquidity',0))}`",
+            f"📊 MCap: `{fmt_mcap(info.get('mcap',0))}`",
+            f"📦 Vol 24h: `{fmt_mcap(info.get('volume24h',0))}`",
+        ]
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+
+
+async def token_panel_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """/token [chain] [address] — Open the Fluxbot-style trade panel."""
+    args = ctx.args
+    if len(args) < 2:
+        await update.message.reply_text(
+            "📊 *Token Panel*\n\n"
+            "Usage: `/token [chain] [address]`\n\n"
+            "Example:\n"
+            "`/token solana TokenMintAddress`\n"
+            "`/token ethereum 0xTokenAddress`\n\n"
+            "Opens the full trade panel with chart, rug check, buy/sell buttons\.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+
+    chain_key = args[0].lower()
+    token     = args[1]
+    _, ci     = get_chain(chain_key)
+    if not ci:
+        await update.message.reply_text(f"❌ Unknown chain: `{chain_key}`", parse_mode=ParseMode.MARKDOWN)
+        return
+
+    user = ensure_user(update)
+    msg  = await update.message.reply_text("⏳ Loading token data\.\.\.", parse_mode=ParseMode.MARKDOWN)
+
+    text = await _build_token_panel_text(chain_key, token, user["id"], "paper")
+    kb   = _token_panel_keyboard(chain_key, token, "paper")
+
+    await msg.edit_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+
+
+async def tp_refresh_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Refresh the token panel with latest data."""
+    await update.callback_query.answer("Refreshing...")
+    parts = update.callback_query.data.split(":")
+    chain, token, mode = parts[1], parts[2], parts[3]
+    user  = ensure_user(update)
+    text  = await _build_token_panel_text(chain, token, user["id"], mode)
+    kb    = _token_panel_keyboard(chain, token, mode)
+    try:
+        await update.callback_query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+    except Exception:
+        pass  # Telegram throws if content unchanged
+
+
+async def rugcheck_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Run rug check on a token and display results."""
+    await update.callback_query.answer("Checking...")
+    parts = update.callback_query.data.split(":")
+    chain, token = parts[1], parts[2]
+    ci = CHAINS.get(chain, {})
+
+    result = rug_check(chain, token)
+    score  = result["score"]
+    warns  = result["warnings"]
+    info   = result.get("info", {})
+
+    lines = [
+        f"🕵️ *Rug Check Report*",
+        f"",
+        f"{ci.get('emoji','')} Chain: {ci.get('name', chain)}",
+        f"📍 `{token[:16]}\.\.\. `",
+        f"",
+        f"*Risk Score: {score}*",
+        f"",
+        f"*Findings:*",
+    ]
+    for w in warns:
+        lines.append(f"  {w}")
+
+    if info:
+        lines += [
+            f"",
+            f"*Token Stats:*",
+            f"  💧 Liquidity: {fmt_mcap(info.get('liquidity',0))}",
+            f"  📊 MCap: {fmt_mcap(info.get('mcap',0))}",
+            f"  📦 Vol 24h: {fmt_mcap(info.get('volume24h',0))}",
+            f"  🔀 DEX: {info.get('dex','?')}",
+        ]
+        if info.get("age_hours") is not None:
+            h = info["age_hours"]
+            age = f"{h*60:.0f}m" if h < 1 else (f"{h:.1f}h" if h < 24 else f"{h/24:.1f}d")
+            lines.append(f"  🕐 Age: {age}")
+
+    lines += [
+        f"",
+        f"_Always do your own research\. "
+        f"This is not financial advice\._",
+    ]
+
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("« Back to Panel",
+                             callback_data=f"tp_refresh:{chain}:{token}:paper")
+    ]])
+    await send(update, "\n".join(lines), kb, edit=True)
+
+
+async def tp_buy_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Show buy amount buttons for the token panel."""
+    await update.callback_query.answer()
+    parts = update.callback_query.data.split(":")
+    chain, token, mode = parts[1], parts[2], parts[3]
+    ci = CHAINS.get(chain, {})
+
+    # Show SOL/ETH/BNB amount buttons
+    sym = ci.get("symbol", "ETH")
+    buttons = [
+        [
+            InlineKeyboardButton(f"0.01 {sym}", callback_data=f"tp_amt:{chain}:{token}:{mode}:buy:0.01"),
+            InlineKeyboardButton(f"0.05 {sym}", callback_data=f"tp_amt:{chain}:{token}:{mode}:buy:0.05"),
+            InlineKeyboardButton(f"0.1 {sym}",  callback_data=f"tp_amt:{chain}:{token}:{mode}:buy:0.1"),
+        ],
+        [
+            InlineKeyboardButton(f"0.5 {sym}",  callback_data=f"tp_amt:{chain}:{token}:{mode}:buy:0.5"),
+            InlineKeyboardButton(f"1 {sym}",    callback_data=f"tp_amt:{chain}:{token}:{mode}:buy:1"),
+            InlineKeyboardButton(f"Custom",     callback_data=f"tp_custom:{chain}:{token}:{mode}:buy"),
+        ],
+        [InlineKeyboardButton("« Back", callback_data=f"tp_refresh:{chain}:{token}:{mode}")],
+    ]
+    await send(update,
+        f"🟢 *Buy {ci.get('name', chain)} Token*\n\n"
+        f"Select how much *{sym}* to spend:",
+        InlineKeyboardMarkup(buttons), edit=True)
+
+
+async def tp_sell_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Show sell percentage buttons for the token panel."""
+    await update.callback_query.answer()
+    parts = update.callback_query.data.split(":")
+    chain, token, mode = parts[1], parts[2], parts[3]
+    ci  = CHAINS.get(chain, {})
+    user = ensure_user(update)
+
+    # Find what token symbol we have
+    info = get_token_full_info(chain, token)
+    sym  = info["base_symbol"] if info else "TOKEN"
+    bal  = db.get_paper_balance(user["id"], sym.upper(), chain)
+
+    buttons = [
+        [
+            InlineKeyboardButton("25%",   callback_data=f"tp_sell_pct:{chain}:{token}:{mode}:{sym}:25"),
+            InlineKeyboardButton("50%",   callback_data=f"tp_sell_pct:{chain}:{token}:{mode}:{sym}:50"),
+            InlineKeyboardButton("75%",   callback_data=f"tp_sell_pct:{chain}:{token}:{mode}:{sym}:75"),
+        ],
+        [
+            InlineKeyboardButton("100% (All)", callback_data=f"tp_sell_pct:{chain}:{token}:{mode}:{sym}:100"),
+            InlineKeyboardButton("Custom",     callback_data=f"tp_custom:{chain}:{token}:{mode}:sell"),
+        ],
+        [InlineKeyboardButton("« Back", callback_data=f"tp_refresh:{chain}:{token}:{mode}")],
+    ]
+    price  = info["price"] if info else 0
+    bal_usd = bal * price if price > 0 else 0
+    await send(update,
+        f"⚫ *Sell {sym}*\n\n"
+        f"Your balance: `{bal:.6f} {sym}` \(≈${bal_usd:.4f}\)\n\n"
+        f"Select % to sell:",
+        InlineKeyboardMarkup(buttons), edit=True)
+
+
+async def tp_amt_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Execute paper buy for a specific amount from the panel."""
+    await update.callback_query.answer("Executing...")
+    parts  = update.callback_query.data.split(":")
+    chain, token, mode, action, amount_str = parts[1], parts[2], parts[3], parts[4], parts[5]
+    user   = ensure_user(update)
+    ci     = CHAINS.get(chain, {})
+
+    try:
+        amount = float(amount_str)
+        info   = get_token_full_info(chain, token)
+        sym    = info["base_symbol"] if info else "TOKEN"
+
+        if mode == "paper":
+            result = paper_buy(user["id"], chain, token, sym, amount)
+            pnl_emoji = "✅"
+            text = (
+                f"{pnl_emoji} *Paper Buy Executed\!*\n\n"
+                f"{ci.get('emoji','')} {ci.get('name', chain)}\n"
+                f"💸 Spent: `{amount} {ci.get('symbol','')}`\n"
+                f"🪙 Got: `{result['received']:.6f} {sym}`\n"
+                f"💵 Price: `{fmt_price(result['price'])}`\n"
+                f"💰 USD: `${result['usd_value']:.4f}`"
+            )
+        else:
+            text = "💎 Live buy — use /buy command for live trades\."
+
+    except Exception as e:
+        text = f"❌ Buy failed: {e}"
+
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("🔄 Refresh Panel", callback_data=f"tp_refresh:{chain}:{token}:{mode}")
+    ]])
+    await send(update, text, kb, edit=True)
+
+
+async def tp_sell_pct_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Execute paper sell for a percentage of holdings from the panel."""
+    await update.callback_query.answer("Selling...")
+    parts  = update.callback_query.data.split(":")
+    chain, token, mode, sym, pct_str = parts[1], parts[2], parts[3], parts[4], parts[5]
+    pct    = float(pct_str) / 100
+    user   = ensure_user(update)
+    ci     = CHAINS.get(chain, {})
+
+    try:
+        bal    = db.get_paper_balance(user["id"], sym.upper(), chain)
+        amount = bal * pct
+        if amount <= 0:
+            await send(update, f"❌ No {sym} balance to sell\.", edit=True)
+            return
+
+        if mode == "paper":
+            result = paper_sell(user["id"], chain, token, sym, amount)
+            pnl    = result["realized_pnl_usd"]
+            ppct   = result["realized_pnl_pct"]
+            pnl_e  = "✅" if pnl >= 0 else "❌"
+            text = (
+                f"{pnl_e} *Paper Sell Executed\!*\n\n"
+                f"{ci.get('emoji','')} {ci.get('name', chain)}\n"
+                f"🪙 Sold: `{amount:.6f} {sym}` \({pct_str}%\)\n"
+                f"💸 Got: `{result['received']:.6f} {result['received_symbol']}`\n"
+                f"💵 Price: `{fmt_price(result['price'])}`\n\n"
+                f"{pnl_e} *Realized P&L:* "
+                f"`{'+'if pnl>=0 else ''}{pnl:.4f}` "
+                f"\(`{'+'if ppct>=0 else ''}{ppct:.2f}%`\)"
+            )
+        else:
+            text = "💎 Live sell — use /sell command for live trades\."
+
+    except Exception as e:
+        text = f"❌ Sell failed: {e}"
+
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("🔄 Refresh Panel", callback_data=f"tp_refresh:{chain}:{token}:{mode}")
+    ]])
+    await send(update, text, kb, edit=True)
+
+
+async def tp_noop_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """No-op for label buttons."""
+    await update.callback_query.answer()
+
 async def pbuy_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     args = ctx.args
     if len(args) < 3:
@@ -907,31 +1307,34 @@ async def my_strategies_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         status_e = {"active": "🟢", "stopped": "🔴", "paused": "⏸"}.get(s["status"], "⚪")
         mode_tag = "📝" if s["mode"] == "paper" else "💎"
 
-        # P&L display
-        pnl = stats["total_pnl"]
-        pnl_str = f"{'+'if pnl>=0 else ''}{pnl:.4f}"
-        pnl_emoji = "✅" if pnl >= 0 else "❌"
+        # Realized P&L from closed positions
+        realized = db.get_realized_pnl(user["id"], s["id"])
+        # Unrealized P&L from open positions
+        unrealized_data = get_unrealized_pnl(user["id"], s["id"])
+        unrealized = unrealized_data["total_unrealized"]
+        total_pnl  = realized + unrealized
 
-        # Win rate
-        wr_str = f"{stats['win_rate']*100:.0f}%" if stats["total_trades"] > 0 else "—"
+        pnl_emoji = "✅" if total_pnl >= 0 else "❌"
+        pnl_str   = f"{'+'if total_pnl>=0 else ''}{total_pnl:.4f}"
+        wr_str    = f"{stats['win_rate']*100:.0f}%" if stats["total_trades"] > 0 else "—"
+        logs      = get_learning_log(s["id"])
+        learned_str = f" 🧠x{len(logs)}" if logs else ""
 
-        # Learning log count
-        logs = get_learning_log(s["id"])
-        learned_str = f" 🧠 auto\\-adjusted {len(logs)}x" if logs else ""
+        # Live token data (mcap + volume)
+        token_info = get_token_full_info(s["chain"], s["token_address"])
+        mcap_str = fmt_mcap(token_info["mcap"])    if token_info else "N/A"
+        vol_str  = fmt_mcap(token_info["volume24h"]) if token_info else "N/A"
+        price_str= fmt_price(token_info["price"])  if token_info else "N/A"
+        ch24_str = f"{'+'if(token_info or {}).get('change24h',0)>=0 else ''}{(token_info or {}).get('change24h',0):.1f}%" if token_info else ""
 
         text += (
             f"{status_e}{mode_tag} *{s_info.get('name', s['name'])}* \\[\\#{s['id']}\\]\n"
-            f"  {ci.get('emoji','')} {ci.get('name',s['chain'])} — "
-            f"*{s.get('token_symbol','?')}*\n"
-            f"  📊 {stats['total_trades']} trades | "
-            f"WR: {wr_str} | "
-            f"{pnl_emoji} P&L: `{pnl_str}`{learned_str}\n"
+            f"  {ci.get('emoji','')} {ci.get('name',s['chain'])} — *{s.get('token_symbol','?')}*\n"
+            f"  💵 {price_str} {ch24_str} | MCap: {mcap_str} | Vol: {vol_str}\n"
+            f"  {stats['total_trades']} trades | WR: {wr_str} | {pnl_emoji} P&L: `{pnl_str}`{learned_str}\n"
         )
-        if stats["total_trades"] > 0:
-            text += (
-                f"  Best: `+{stats['best_trade']:.2f}%` | "
-                f"Worst: `{stats['worst_trade']:.2f}%`\n"
-            )
+        if unrealized_data["positions"]:
+            text += f"  📂 {len(unrealized_data['positions'])} open pos | Unrealized: `{'+'if unrealized>=0 else ''}{unrealized:.4f}`\n"
         text += "\n"
 
         row = []
@@ -1655,6 +2058,11 @@ async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "`/alert [chain] [token] [above|below] [price]`\n"
         "`/alerts` — Manage alerts\n\n"
         "*CHAINS:* ethereum bsc polygon arbitrum base avalanche solana\n\n"
+        "*TOKEN PANEL & ANALYSIS*\n"
+        "`/token [chain] [address]` — Full trade panel with chart, buy/sell\n"
+        "`/rugcheck [chain] [address]` — Rug pull risk analysis\n\n"
+        "*RESET*\n"
+        "`/reset` — Selectively wipe data \(double confirmed\)\n\n"
         "_Use `native` as token for ETH/BNB/SOL etc_"
     )
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data="back:main")]])
@@ -2026,7 +2434,11 @@ def main():
     try:
         db.ensure_learning_tables()
     except Exception:
-        pass  # Tables may already exist
+        pass
+    try:
+        db.ensure_positions_table()
+    except Exception:
+        pass
     print("✅ Database initialised")
 
     app = Application.builder().token(BOT_TOKEN).build()
@@ -2094,6 +2506,8 @@ def main():
     app.add_handler(CommandHandler("report",     weekly_report_cmd))
     app.add_handler(CommandHandler("cleanup",    cleanup_cmd))
     app.add_handler(CommandHandler("reset",      reset_cmd))
+    app.add_handler(CommandHandler("token",      token_panel_cmd))
+    app.add_handler(CommandHandler("rugcheck",   rugcheck_standalone_cmd))
 
     # ── Conversations (must come before generic callback handlers) ────────────
     app.add_handler(import_conv)
@@ -2121,6 +2535,13 @@ def main():
     app.add_handler(CallbackQueryHandler(reset_callback,           pattern="^reset:"))
     app.add_handler(CallbackQueryHandler(reset_confirm_callback,   pattern="^reset_confirm:"))
     app.add_handler(CallbackQueryHandler(cancel_callback,          pattern="^cancel$"))
+    app.add_handler(CallbackQueryHandler(tp_refresh_callback,      pattern="^tp_refresh:"))
+    app.add_handler(CallbackQueryHandler(rugcheck_callback,        pattern="^rugcheck:"))
+    app.add_handler(CallbackQueryHandler(tp_buy_callback,          pattern="^tp_buy:"))
+    app.add_handler(CallbackQueryHandler(tp_sell_callback,         pattern="^tp_sell:"))
+    app.add_handler(CallbackQueryHandler(tp_amt_callback,          pattern="^tp_amt:"))
+    app.add_handler(CallbackQueryHandler(tp_sell_pct_callback,     pattern="^tp_sell_pct:"))
+    app.add_handler(CallbackQueryHandler(tp_noop_callback,         pattern="^noop$"))
 
     # ── Background loop ───────────────────────────────────────────────────────
     async def post_init(application: Application):
