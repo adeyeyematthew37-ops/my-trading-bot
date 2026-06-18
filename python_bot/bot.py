@@ -90,6 +90,7 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
          InlineKeyboardButton("🔔 Alerts", callback_data="menu:alerts")],
         [InlineKeyboardButton("📜 History", callback_data="menu:history"),
          InlineKeyboardButton("❓ Help", callback_data="menu:help")],
+        [InlineKeyboardButton("📊 Perp Trading", callback_data="menu:perp")],
     ])
 
 def ensure_user(update: Update) -> dict:
@@ -2118,10 +2119,12 @@ async def _process_strategies(app: Application):
                     try:
                         result = paper_buy(
                             user_id, s["chain"], s["token_address"],
-                            s.get("token_symbol", "TOKEN"), trade_amount
+                            s.get("token_symbol", "TOKEN"), trade_amount,
+                            strategy_id=s["id"]
                         )
                         on_trade_executed(s["id"], "buy", entry_price)
-                        trade_id = db.save_trade({
+                        # paper_buy already calls save_trade internally
+                        if False: trade_id = db.save_trade({
                             "user_id":    user_id,
                             "chain":      s["chain"],
                             "trade_type": "buy",
@@ -2149,7 +2152,8 @@ async def _process_strategies(app: Application):
                     try:
                         result = paper_sell(
                             user_id, s["chain"], s["token_address"],
-                            token_sym, balance * 0.9  # sell 90%
+                            token_sym, balance * 0.9,
+                            strategy_id=s["id"]  # links position for real PnL
                         )
                         on_trade_executed(s["id"], "sell", signal["indicators"].get("current_price", 0))
                         exit_price = signal["indicators"].get("current_price", 0)
@@ -2439,6 +2443,11 @@ def main():
         db.ensure_positions_table()
     except Exception:
         pass
+    try:
+        from trading.perpetuals import ensure_perp_tables
+        ensure_perp_tables()
+    except Exception:
+        pass
     print("✅ Database initialised")
 
     app = Application.builder().token(BOT_TOKEN).build()
@@ -2548,6 +2557,12 @@ def main():
         asyncio.create_task(run_background_tasks(application))
 
     app.post_init = post_init
+
+    # ── Perpetuals handlers ──────────────────────────────────────────────────
+    from bot.perp_handlers import register_perp_handlers
+    register_perp_handlers(app)
+
+    # ── Perp button in main menu (add to menu callback) ───────────────────────
 
     print("🚀 Bot is running! Open Telegram and send /start")
     app.run_polling(drop_pending_updates=True)

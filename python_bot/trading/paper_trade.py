@@ -27,10 +27,22 @@ def paper_buy(user_id: int, chain: str, token_address: str, token_symbol: str,
 
     native_symbol = chain_info["symbol"]
 
-    # Fetch live price
+    # Normalize token symbol — always uppercase, strip whitespace
+    # Use token address short form if symbol is generic
+    if not token_symbol or token_symbol.upper() in ("TOKEN", "UNKNOWN", ""):
+        token_symbol = token_address[:8].upper()
+    token_symbol = token_symbol.upper().strip()
+
+    # Fetch live price — try DexScreener for any unknown token
     price_data = get_token_price(chain, token_address, coingecko_id)
     if not price_data or not price_data.get("price"):
-        raise ValueError(f"Could not fetch price for {token_symbol or token_address}")
+        from utils.prices import get_token_full_info
+        info = get_token_full_info(chain, token_address)
+        if info and info.get("price"):
+            price_data = {"price": info["price"]}
+            token_symbol = info.get("base_symbol", token_symbol).upper()
+        else:
+            raise ValueError(f"Could not fetch price for {token_symbol}")
 
     token_price_usd = price_data["price"]
     native_usd      = _get_native_usd(chain)
@@ -39,8 +51,8 @@ def paper_buy(user_id: int, chain: str, token_address: str, token_symbol: str,
 
     # Deduct native balance
     db.subtract_paper_balance(user_id, native_symbol, chain, amount_native)
-    # Add token balance
-    db.add_paper_balance(user_id, token_symbol.upper(), chain, tokens_received)
+    # Add token balance — key is always UPPER normalized symbol
+    db.add_paper_balance(user_id, token_symbol, chain, tokens_received)
 
     # Save trade record
     trade_id = db.save_trade({

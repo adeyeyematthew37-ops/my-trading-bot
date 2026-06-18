@@ -62,6 +62,25 @@ CHAINS = {
         "native": "So11111111111111111111111111111111111111112",
         "coingecko_id": "solana",
     },
+    "near": {
+        "id": "near", "name": "NEAR Protocol", "symbol": "NEAR",
+        "emoji": "Ⓝ", "type": "near",
+        "explorer": "https://nearblocks.io",
+        "native": "near",
+        "coingecko_id": "near",
+        # Perpetuals DEXs on NEAR
+        "perp_dexs": {
+            "orderly": {
+                "name": "Orderly Network",
+                "url": "https://orderly.network",
+                "api": "https://api-evm.orderly.org",
+            },
+            "burrow": {
+                "name": "Burrow Finance",
+                "url": "https://burrow.finance",
+            },
+        },
+    },
 }
 
 CHAIN_ALIASES = {
@@ -71,6 +90,7 @@ CHAIN_ALIASES = {
     "arb": "arbitrum",
     "avax": "avalanche",
     "sol": "solana",
+    "near protocol": "near",
 }
 
 # Common tokens for quick reference
