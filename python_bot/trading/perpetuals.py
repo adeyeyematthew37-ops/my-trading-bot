@@ -22,6 +22,116 @@ PERP_MARKETS = {
 
 FUNDING_INTERVAL = 8  # hours — standard perp funding
 
+# ─── Rhea Finance & Marketplace Info ─────────────────────────────────────────
+# Rhea is a NEAR-native perpetuals DEX — the main perp venue for NEAR/HOT wallets
+
+RHEA_MARKETS = {
+    "BTC-PERP": {
+        "rhea_symbol": "BTC_PERP",
+        "trade_url":   "https://rhea.finance/trade/BTC",
+        "chart_url":   "https://rhea.finance/trade/BTC",
+        "leverage_max": 50,
+    },
+    "ETH-PERP": {
+        "rhea_symbol": "ETH_PERP",
+        "trade_url":   "https://rhea.finance/trade/ETH",
+        "chart_url":   "https://rhea.finance/trade/ETH",
+        "leverage_max": 50,
+    },
+    "NEAR-PERP": {
+        "rhea_symbol": "NEAR_PERP",
+        "trade_url":   "https://rhea.finance/trade/NEAR",
+        "chart_url":   "https://rhea.finance/trade/NEAR",
+        "leverage_max": 20,
+    },
+    "SOL-PERP": {
+        "rhea_symbol": "SOL_PERP",
+        "trade_url":   "https://rhea.finance/trade/SOL",
+        "chart_url":   "https://rhea.finance/trade/SOL",
+        "leverage_max": 20,
+    },
+}
+
+ORDERLY_MARKETS = {
+    "BTC-PERP": {"trade_url": "https://orderly.network/trading/PERP_BTC_USDC"},
+    "ETH-PERP": {"trade_url": "https://orderly.network/trading/PERP_ETH_USDC"},
+    "NEAR-PERP":{"trade_url": "https://orderly.network/trading/PERP_NEAR_USDC"},
+    "SOL-PERP": {"trade_url": "https://orderly.network/trading/PERP_SOL_USDC"},
+}
+
+# ─── Aster Marketplace ────────────────────────────────────────────────────────
+# Aster is a prediction-market / perpetuals hybrid on NEAR Protocol
+# Users vote on price direction and trade accordingly
+
+ASTER_MARKETS = {
+    "BTC-PERP": {
+        "aster_symbol":  "BTC",
+        "trade_url":     "https://aster.fi/trade/BTC",
+        "predict_url":   "https://aster.fi/predict/BTC",
+        "leverage_max":  100,
+        "description":   "BTC perpetual on Aster — up to 100x leverage",
+    },
+    "ETH-PERP": {
+        "aster_symbol":  "ETH",
+        "trade_url":     "https://aster.fi/trade/ETH",
+        "predict_url":   "https://aster.fi/predict/ETH",
+        "leverage_max":  100,
+        "description":   "ETH perpetual on Aster",
+    },
+    "NEAR-PERP": {
+        "aster_symbol":  "NEAR",
+        "trade_url":     "https://aster.fi/trade/NEAR",
+        "predict_url":   "https://aster.fi/predict/NEAR",
+        "leverage_max":  50,
+        "description":   "NEAR perpetual on Aster — native token",
+    },
+    "SOL-PERP": {
+        "aster_symbol":  "SOL",
+        "trade_url":     "https://aster.fi/trade/SOL",
+        "predict_url":   "https://aster.fi/predict/SOL",
+        "leverage_max":  50,
+        "description":   "SOL perpetual on Aster",
+    },
+    "BNB-PERP": {
+        "aster_symbol":  "BNB",
+        "trade_url":     "https://aster.fi/trade/BNB",
+        "predict_url":   "https://aster.fi/predict/BNB",
+        "leverage_max":  50,
+        "description":   "BNB perpetual on Aster",
+    },
+    "ARB-PERP": {
+        "aster_symbol":  "ARB",
+        "trade_url":     "https://aster.fi/trade/ARB",
+        "predict_url":   "https://aster.fi/predict/ARB",
+        "leverage_max":  20,
+        "description":   "ARB perpetual on Aster",
+    },
+}
+
+def get_aster_trade_url(market: str) -> str:
+    return ASTER_MARKETS.get(market, {}).get("trade_url", "https://aster.fi/trade")
+
+def get_aster_predict_url(market: str) -> str:
+    return ASTER_MARKETS.get(market, {}).get("predict_url", "https://aster.fi/predict")
+
+def get_market_links(market: str) -> dict:
+    """Get trading links for a perp market across all supported venues."""
+    rhea    = RHEA_MARKETS.get(market, {})
+    orderly = ORDERLY_MARKETS.get(market, {})
+    aster   = ASTER_MARKETS.get(market, {})
+    return {
+        "rhea_url":         rhea.get("trade_url"),
+        "orderly_url":      orderly.get("trade_url"),
+        "aster_url":        aster.get("trade_url"),
+        "aster_predict_url":aster.get("predict_url"),
+        "max_leverage_rhea":  rhea.get("leverage_max", 20),
+        "max_leverage_aster": aster.get("leverage_max", 50),
+    }
+
+def get_rhea_trade_url(market: str) -> str:
+    """Direct link to trade this market on Rhea Finance."""
+    return RHEA_MARKETS.get(market, {}).get("trade_url", "https://rhea.finance/trade")
+
 # ─── Price history for perp signals ──────────────────────────────────────────
 _perp_price_history: dict = {}
 

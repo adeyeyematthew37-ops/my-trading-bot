@@ -12,7 +12,9 @@ from trading.perpetuals import (
     PERP_STRATEGIES, PERP_MARKETS, get_perp_signal, get_perp_price,
     paper_perp_open, paper_perp_close, get_open_perp_positions,
     ensure_perp_tables, save_majority_vote, update_perp_pnl,
-    close_perp_position
+    close_perp_position, get_market_links, get_rhea_trade_url,
+    get_aster_trade_url, get_aster_predict_url,
+    RHEA_MARKETS, ASTER_MARKETS, ORDERLY_MARKETS
 )
 from utils.prices import fmt_price
 from utils import database as db
@@ -84,12 +86,16 @@ async def perp_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"_Start with paper trading first\\!_"
     )
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📈 Long",        callback_data="perp_open:long"),
-         InlineKeyboardButton("📉 Short",       callback_data="perp_open:short")],
-        [InlineKeyboardButton("📋 Positions",   callback_data="perp_positions"),
-         InlineKeyboardButton("🤖 Strategies",  callback_data="perp_strategies")],
-        [InlineKeyboardButton("🗳️ Vote",         callback_data="perp_vote_start"),
-         InlineKeyboardButton("📜 History",     callback_data="perp_history")],
+        [InlineKeyboardButton("📈 Long",         callback_data="perp_open:long"),
+         InlineKeyboardButton("📉 Short",        callback_data="perp_open:short")],
+        [InlineKeyboardButton("📋 Positions",    callback_data="perp_positions"),
+         InlineKeyboardButton("🤖 Strategies",   callback_data="perp_strategies")],
+        [InlineKeyboardButton("🔥 Rhea Finance", callback_data="perp_rhea_menu"),
+         InlineKeyboardButton("⭐ Aster",         callback_data="perp_aster_menu")],
+        [InlineKeyboardButton("📊 Orderly",       callback_data="perp_orderly_menu")],
+        [InlineKeyboardButton("🗳️ Vote",          callback_data="perp_vote_start"),
+         InlineKeyboardButton("📜 History",      callback_data="perp_history")],
+        [InlineKeyboardButton("💳 Import NEAR/HOT Wallet", callback_data="perp_import_wallet")],
         [InlineKeyboardButton("« Back", callback_data="back:main")],
     ])
     await send_perp(update, text, kb, edit=bool(update.callback_query))
@@ -507,6 +513,265 @@ async def process_perp_strategy(s: dict, params: dict, app) -> None:
                 pass
 
 
+# ─── Rhea Finance Menu ───────────────────────────────────────────────────────
+
+async def perp_rhea_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Show Rhea Finance market links."""
+    await update.callback_query.answer()
+    text = (
+        "🔥 *Rhea Finance — NEAR Perps DEX*\n\n"
+        "Rhea is the leading perpetuals DEX on NEAR Protocol\. "
+        "Connect your NEAR or HOT wallet to trade live\.\n\n"
+        "*Available Markets:*\n"
+    )
+    rows = []
+    for market, info in RHEA_MARKETS.items():
+        price = get_perp_price(market)
+        price_str = fmt_price(price) if price else "N/A"
+        text += f"  • *{market}*: {price_str} \(max {info['leverage_max']}x\)\n"
+        rows.append([
+            InlineKeyboardButton(
+                f"📈 Trade {market} on Rhea",
+                url=info["trade_url"]
+            )
+        ])
+    text += (
+        "\n*How to connect your wallet:*\n"
+        "1\. Open Rhea Finance link above\n"
+        "2\. Click *Connect Wallet*\n"
+        "3\. Select *NEAR Wallet*, *HOT Wallet*, or *MyNearWallet*\n"
+        "4\. Approve the connection\n\n"
+        "_Paper trade here first to test your strategy, then go live on Rhea\!_"
+    )
+    rows.append([InlineKeyboardButton("📝 Paper Trade Instead", callback_data="perp_open:long")])
+    rows.append([InlineKeyboardButton("« Back", callback_data="menu:perp")])
+    await send_perp(update, text, InlineKeyboardMarkup(rows), edit=True)
+
+
+async def perp_orderly_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Show Orderly Network market links."""
+    await update.callback_query.answer()
+    from trading.perpetuals import ORDERLY_MARKETS
+    text = (
+        "📊 *Orderly Network — Institutional Perps*\n\n"
+        "Orderly powers professional perp trading on NEAR with "
+        "deep liquidity and tight spreads\.\n\n"
+        "*Markets:*\n"
+    )
+    rows = []
+    for market, info in ORDERLY_MARKETS.items():
+        price = get_perp_price(market)
+        price_str = fmt_price(price) if price else "N/A"
+        text += f"  • *{market}*: {price_str}\n"
+        rows.append([InlineKeyboardButton(
+            f"📊 {market} on Orderly", url=info["trade_url"]
+        )])
+    rows.append([InlineKeyboardButton("📝 Paper Trade Instead", callback_data="perp_open:long")])
+    rows.append([InlineKeyboardButton("« Back", callback_data="menu:perp")])
+    await send_perp(update, text, InlineKeyboardMarkup(rows), edit=True)
+
+
+async def perp_import_wallet(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Guide user to import NEAR/HOT wallet for live trading."""
+    await update.callback_query.answer()
+    text = (
+        "💳 *Import NEAR / HOT Wallet*\n\n"
+        "To trade live perps on Rhea or Orderly, import your wallet:\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "Ⓝ *NEAR Wallet*\n"
+        "Go to: Menu → Wallets → Import\n"
+        "Select chain: *NEAR*\n"
+        "Paste your NEAR private key or 12\-word seed phrase\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "🔥 *HOT Wallet \(HOT Chain\)*\n"
+        "Go to: Menu → Wallets → Import\n"
+        "Select chain: *HOT*\n"
+        "HOT Wallet uses the same key as your NEAR account\n"
+        "Find it in: HOT Wallet app → Settings → Export Key\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "💡 *Tip:* After importing, use paper trading first\. "
+        "When ready for live trading, your imported wallet "
+        "will be used automatically on Rhea\.\n\n"
+        "_Your key is encrypted with AES\-256 and never sent anywhere\._"
+    )
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("👛 Go to Wallets → Import", callback_data="wallet:import")],
+        [InlineKeyboardButton("🔥 Rhea Finance", url="https://rhea.finance")],
+        [InlineKeyboardButton("« Back", callback_data="menu:perp")],
+    ])
+    await send_perp(update, text, kb, edit=True)
+
+
+# ─── Market info panel (shown when opening position) ─────────────────────────
+
+async def perp_market_info(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Show full market info with Rhea link when a market is selected."""
+    await update.callback_query.answer()
+    market = update.callback_query.data.split(":")[1]
+    ctx.user_data["perp_market"] = market
+    direction = ctx.user_data.get("perp_dir", "long")
+
+    price     = get_perp_price(market)
+    links     = get_market_links(market)
+    dir_label = "📈 LONG" if direction == "long" else "📉 SHORT"
+    price_str = fmt_price(price) if price else "N/A"
+    max_lev   = links.get("max_leverage_rhea", 20)
+
+    # Market stats
+    from utils.prices import get_price_coingecko
+    from trading.perpetuals import PERP_MARKETS as PM
+    cg_id = PM.get(market, {}).get("base")
+    pd = get_price_coingecko(cg_id) if cg_id else None
+    change_str = ""
+    if pd and pd.get("change24h") is not None:
+        c = pd["change24h"]
+        change_str = f" \({'+'if c>=0 else ''}{c:.1f}%\)"
+
+    text = (
+        f"📊 *{market}*\n\n"
+        f"💵 Price: *{price_str}*{change_str}\n"
+        f"⚡ Max Leverage on Rhea: *{max_lev}x*\n"
+        f"Direction: {dir_label}\n\n"
+        f"_Choose position size:_"
+    )
+    rows = [
+        [InlineKeyboardButton("$1",  callback_data="ps:1"),
+         InlineKeyboardButton("$5",  callback_data="ps:5"),
+         InlineKeyboardButton("$10", callback_data="ps:10")],
+        [InlineKeyboardButton("$25", callback_data="ps:25"),
+         InlineKeyboardButton("$50", callback_data="ps:50"),
+         InlineKeyboardButton("Custom", callback_data="ps:custom")],
+        [InlineKeyboardButton(
+            f"🔥 Trade Live on Rhea",
+            url=get_rhea_trade_url(market)
+        )],
+        [InlineKeyboardButton("❌ Cancel", callback_data="menu:perp")],
+    ]
+    await send_perp(update, text, InlineKeyboardMarkup(rows), edit=True)
+    return AWAIT_PERP_SIZE
+
+
+
+# ─── Aster Marketplace Menu ───────────────────────────────────────────────────
+
+async def perp_aster_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Show Aster marketplace — perps + prediction markets on NEAR."""
+    await update.callback_query.answer()
+
+    text = (
+        "⭐ *Aster Marketplace — NEAR Perps & Predictions*\n\n"
+        "Aster is a next\-gen hybrid platform combining perpetual futures "
+        "with prediction markets on NEAR Protocol\.\n"
+        "Connect your NEAR or HOT wallet and trade up to *100x* leverage\.\n\n"
+        "*Available Markets:*\n"
+    )
+
+    rows = []
+    for market, info in ASTER_MARKETS.items():
+        price     = get_perp_price(market)
+        price_str = fmt_price(price) if price else "N/A"
+        max_lev   = info.get("leverage_max", 50)
+        text += f"  • *{market}*: {price_str} \(max {max_lev}x\)\n"
+        rows.append([
+            InlineKeyboardButton(
+                f"📈 Trade {market}", url=info["trade_url"]
+            ),
+            InlineKeyboardButton(
+                f"🗳️ Predict {market.split('-')[0]}", url=info["predict_url"]
+            ),
+        ])
+
+    text += (
+        "\n*Two ways to use Aster:*\n"
+        "1\. 📈 *Trade* — Open long/short positions with leverage\n"
+        "2\. 🗳️ *Predict* — Vote on price direction in short rounds "
+        "\(works with the Majority Vote Sniper strategy\)\n\n"
+        "*How to connect:*\n"
+        "1\. Tap any market link above\n"
+        "2\. Click *Connect Wallet* on Aster\n"
+        "3\. Choose *NEAR Wallet* or *HOT Wallet*\n"
+        "4\. Sign the connection\n\n"
+        "_Paper trade here first to practice, then go live on Aster\!_"
+    )
+
+    rows.append([InlineKeyboardButton(
+        "🤖 Majority Vote Sniper Strategy",
+        callback_data="psi:perp_majority_vote"
+    )])
+    rows.append([InlineKeyboardButton("📝 Paper Trade", callback_data="perp_open:long")])
+    rows.append([InlineKeyboardButton("« Back", callback_data="menu:perp")])
+
+    await send_perp(update, text, InlineKeyboardMarkup(rows), edit=True)
+
+
+# ─── Enhanced market info panel with all 3 exchange links ────────────────────
+
+async def perp_market_info_v2(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Full market info panel — shows Rhea, Aster and Orderly links."""
+    await update.callback_query.answer()
+    market    = update.callback_query.data.split(":")[1]
+    ctx.user_data["perp_market"] = market
+    direction = ctx.user_data.get("perp_dir", "long")
+
+    price     = get_perp_price(market)
+    links     = get_market_links(market)
+    dir_label = "📈 LONG" if direction == "long" else "📉 SHORT"
+    price_str = fmt_price(price) if price else "N/A"
+    max_lev_r = links.get("max_leverage_rhea", 20)
+    max_lev_a = links.get("max_leverage_aster", 50)
+
+    from utils.prices import get_price_coingecko
+    from trading.perpetuals import PERP_MARKETS as PM
+    cg_id = PM.get(market, {}).get("base")
+    pd    = get_price_coingecko(cg_id) if cg_id else None
+    change_str = ""
+    if pd and pd.get("change24h") is not None:
+        c = pd["change24h"]
+        sign = "+" if c >= 0 else ""
+        change_str = f" \({sign}{c:.1f}%\)"
+
+    text = (
+        f"📊 *{market}*\n\n"
+        f"💵 Price: *{price_str}*{change_str}\n"
+        f"Direction: {dir_label}\n\n"
+        f"*Live Trading Options:*\n"
+        f"  🔥 Rhea Finance — up to {max_lev_r}x\n"
+        f"  ⭐ Aster — up to {max_lev_a}x\n\n"
+        f"_Select paper position size below, or tap a live link:_"
+    )
+
+    rows = [
+        [InlineKeyboardButton("$1",   callback_data="ps:1"),
+         InlineKeyboardButton("$5",   callback_data="ps:5"),
+         InlineKeyboardButton("$10",  callback_data="ps:10")],
+        [InlineKeyboardButton("$25",  callback_data="ps:25"),
+         InlineKeyboardButton("$50",  callback_data="ps:50"),
+         InlineKeyboardButton("Custom", callback_data="ps:custom")],
+    ]
+
+    # Live exchange buttons
+    live_row = []
+    if links.get("rhea_url"):
+        live_row.append(InlineKeyboardButton(
+            "🔥 Live on Rhea", url=links["rhea_url"]
+        ))
+    if links.get("aster_url"):
+        live_row.append(InlineKeyboardButton(
+            "⭐ Live on Aster", url=links["aster_url"]
+        ))
+    if live_row:
+        rows.append(live_row)
+
+    if links.get("orderly_url"):
+        rows.append([InlineKeyboardButton(
+            "📊 Live on Orderly", url=links["orderly_url"]
+        )])
+
+    rows.append([InlineKeyboardButton("❌ Cancel", callback_data="menu:perp")])
+    await send_perp(update, text, InlineKeyboardMarkup(rows), edit=True)
+    return AWAIT_PERP_SIZE
+
+
 # ─── Handler registration ─────────────────────────────────────────────────────
 
 def register_perp_handlers(app):
@@ -516,7 +781,7 @@ def register_perp_handlers(app):
     open_conv = CH(
         entry_points=[CallbackQueryHandler(perp_open_callback, pattern="^perp_open:")],
         states={
-            AWAIT_PERP_MARKET: [CallbackQueryHandler(perp_market_cb, pattern="^pm:")],
+            AWAIT_PERP_MARKET: [CallbackQueryHandler(perp_market_info_v2, pattern="^pm:")],
             AWAIT_PERP_SIZE:   [
                 CallbackQueryHandler(perp_size_cb, pattern="^ps:"),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, perp_size_text),
@@ -551,3 +816,8 @@ def register_perp_handlers(app):
     app.add_handler(CallbackQueryHandler(perp_strat_start_callback,pattern="^pss:"))
     app.add_handler(CallbackQueryHandler(perp_strat_market_callback,pattern="^psm:"))
     app.add_handler(CallbackQueryHandler(perp_history_callback,   pattern="^perp_history$"))
+    app.add_handler(CallbackQueryHandler(perp_rhea_menu,           pattern="^perp_rhea_menu$"))
+    app.add_handler(CallbackQueryHandler(perp_aster_menu,          pattern="^perp_aster_menu$"))
+    app.add_handler(CallbackQueryHandler(perp_orderly_menu,        pattern="^perp_orderly_menu$"))
+    app.add_handler(CallbackQueryHandler(perp_import_wallet,       pattern="^perp_import_wallet$"))
+    app.add_handler(CallbackQueryHandler(perp_market_info_v2,      pattern="^pm:"))

@@ -120,7 +120,8 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"Welcome, *{name}*! 🚀\n\n"
         f"Supported chains:\n"
         f"⟠ Ethereum  🔶 BNB Chain  🟣 Polygon\n"
-        f"🔵 Arbitrum  🔷 Base  🔺 Avalanche  ◎ Solana\n\n"
+        f"🔵 Arbitrum  🔷 Base  🔺 Avalanche  ◎ Solana\n"
+        f"Ⓝ NEAR Protocol  🔥 HOT Chain\n\n"
         f"Choose an option below:"
     )
     if update.callback_query:
@@ -149,6 +150,9 @@ async def menu_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     elif action == "alerts":   await alerts_menu(update, ctx)
     elif action == "history":  await history_menu(update, ctx)
     elif action == "help":     await help_cmd(update, ctx)
+    elif action == "perp":
+        from bot.perp_handlers import perp_menu as _perp_menu
+        await _perp_menu(update, ctx)
 
 async def cancel_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()

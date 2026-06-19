@@ -68,16 +68,60 @@ CHAINS = {
         "explorer": "https://nearblocks.io",
         "native": "near",
         "coingecko_id": "near",
-        # Perpetuals DEXs on NEAR
+        "wallet_app": "MyNearWallet / NEAR Wallet / HOT Wallet",
+        # Perp & DeFi DEXs on NEAR
         "perp_dexs": {
+            "rhea": {
+                "name": "Rhea Finance",
+                "url": "https://rhea.finance",
+                "description": "NEAR-native perpetuals DEX",
+                "markets_url": "https://rhea.finance/trade",
+            },
+            "aster": {
+                "name": "Aster Marketplace",
+                "url": "https://aster.fi",
+                "description": "Perps + prediction markets on NEAR — up to 100x leverage",
+                "markets_url": "https://aster.fi/trade",
+                "predict_url": "https://aster.fi/predict",
+            },
             "orderly": {
                 "name": "Orderly Network",
                 "url": "https://orderly.network",
                 "api": "https://api-evm.orderly.org",
+                "description": "Institutional-grade perp orderbook on NEAR",
             },
-            "burrow": {
-                "name": "Burrow Finance",
-                "url": "https://burrow.finance",
+            "ref_finance": {
+                "name": "Ref Finance",
+                "url": "https://app.ref.finance",
+                "description": "Main AMM DEX on NEAR — spot trading",
+            },
+        },
+    },
+    "hot": {
+        "id": "hot", "name": "HOT Chain", "symbol": "HOT",
+        "emoji": "🔥", "type": "near",  # HOT Chain is built on NEAR tech
+        "explorer": "https://explorer.hot.io",
+        "native": "hot.hot-labs.near",
+        "coingecko_id": "hot-labs",
+        "wallet_app": "HOT Wallet (app.hotdao.ai)",
+        "description": (
+            "HOT Chain is a Layer-2 network built by HOT Protocol on NEAR. "
+            "Your HOT Wallet holds assets on NEAR and HOT Chain. "
+            "Import using your NEAR private key or seed phrase."
+        ),
+        "perp_dexs": {
+            "rhea": {
+                "name": "Rhea Finance",
+                "url": "https://rhea.finance",
+                "description": "Trade perps with HOT wallet via NEAR integration",
+                "markets_url": "https://rhea.finance/trade",
+            },
+            "aster": {
+                "name": "Aster Marketplace",
+                "url": "https://aster.fi",
+                "description": "Perps + prediction markets via HOT/NEAR wallet",
+                "markets_url": "https://aster.fi/trade",
+                "predict_url": "https://aster.fi/predict",
             },
         },
     },
@@ -91,7 +135,11 @@ CHAIN_ALIASES = {
     "avax": "avalanche",
     "sol": "solana",
     "near protocol": "near",
+    "hot chain": "hot",
+    "hotchain": "hot",
+    "hot wallet": "hot",
 }
+
 
 # Common tokens for quick reference
 COMMON_TOKENS = {
