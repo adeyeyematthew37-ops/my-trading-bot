@@ -175,27 +175,51 @@ def paper_sell(user_id: int, chain: str, token_address: str, token_symbol: str,
 def get_unrealized_pnl(user_id: int, strategy_id: int = None) -> dict:
     """
     Calculate current unrealized PnL across all open positions.
-    Fetches live prices for each open position.
+    Fetches live prices via DexScreener for ALL token types.
     """
     positions = db.get_open_positions(user_id, strategy_id)
-    total_cost      = 0.0
-    total_current   = 0.0
+    total_cost       = 0.0
+    total_current    = 0.0
     position_details = []
 
     for pos in positions:
-        try:
-            pd = get_token_price(pos["chain"], pos["token_address"])
-            current_price = pd["price"] if pd and pd.get("price") else pos["entry_price_usd"]
-        except Exception:
-            current_price = pos["entry_price_usd"]
+        # Try multiple price sources in order
+        current_price = 0.0
+        token_addr    = pos["token_address"]
+        chain         = pos["chain"]
 
-        db.update_position_price(pos["id"], current_price)
+        try:
+            # 1. DexScreener (works for ANY token with a pair)
+            from utils.prices import get_price_dexscreener
+            dex = get_price_dexscreener(chain, token_addr)
+            if dex and dex.get("price"):
+                current_price = float(dex["price"])
+        except Exception:
+            pass
+
+        if not current_price:
+            try:
+                # 2. CoinGecko via universal lookup
+                current_price = _get_token_usd_price(
+                    pos.get("token_symbol",""), chain, token_addr
+                )
+            except Exception:
+                pass
+
+        if not current_price:
+            # 3. Fallback to last known price
+            current_price = pos.get("current_price") or pos["entry_price_usd"]
+
+        if current_price:
+            db.update_position_price(pos["id"], current_price)
 
         current_value = pos["qty"] * current_price
         cost_basis    = pos["entry_usd"]
         unrealized    = current_value - cost_basis
-        pct           = ((current_price - pos["entry_price_usd"]) / pos["entry_price_usd"]) * 100 \
-                        if pos["entry_price_usd"] > 0 else 0
+        pct = (
+            ((current_price - pos["entry_price_usd"]) / pos["entry_price_usd"]) * 100
+            if pos["entry_price_usd"] > 0 else 0
+        )
 
         total_cost    += cost_basis
         total_current += current_value
@@ -203,8 +227,8 @@ def get_unrealized_pnl(user_id: int, strategy_id: int = None) -> dict:
         position_details.append({
             "position_id":   pos["id"],
             "token_symbol":  pos["token_symbol"],
-            "token_address": pos["token_address"],
-            "chain":         pos["chain"],
+            "token_address": token_addr,
+            "chain":         chain,
             "qty":           pos["qty"],
             "entry_price":   pos["entry_price_usd"],
             "current_price": current_price,
@@ -217,48 +241,119 @@ def get_unrealized_pnl(user_id: int, strategy_id: int = None) -> dict:
 
     total_unrealized = total_current - total_cost
     return {
-        "positions":       position_details,
-        "total_cost":      total_cost,
-        "total_current":   total_current,
-        "total_unrealized":total_unrealized,
-        "total_pct":       ((total_current - total_cost) / total_cost * 100) if total_cost > 0 else 0,
+        "positions":        position_details,
+        "total_cost":       total_cost,
+        "total_current":    total_current,
+        "total_unrealized": total_unrealized,
+        "total_pct": ((total_current - total_cost) / total_cost * 100) if total_cost > 0 else 0,
     }
+
+
+# Mapping of native chain tokens to CoinGecko IDs — comprehensive list
+NATIVE_COINGECKO = {
+    "ETH":   "ethereum",
+    "BNB":   "binancecoin",
+    "MATIC": "matic-network",
+    "AVAX":  "avalanche-2",
+    "SOL":   "solana",
+    "NEAR":  "near",
+    "HOT":   "hot-labs",
+    "ARB":   "arbitrum",
+    "OP":    "optimism",
+    "FTM":   "fantom",
+    "DOT":   "polkadot",
+    "ADA":   "cardano",
+    "BTC":   "bitcoin",
+    "USDC":  None,   # stablecoin = $1
+    "USDT":  None,   # stablecoin = $1
+    "BUSD":  None,   # stablecoin = $1
+    "DAI":   None,   # stablecoin = $1
+}
+
+
+def _get_token_usd_price(symbol: str, chain: str, token_address: str = None) -> float:
+    """
+    Universal price lookup for any asset in the paper portfolio.
+    Priority: CoinGecko (native tokens) → stablecoin ($1) → DexScreener → 0
+    """
+    sym_upper = symbol.upper()
+
+    # Stablecoins always $1
+    if sym_upper in ("USDC", "USDT", "BUSD", "DAI", "FRAX", "LUSD"):
+        return 1.0
+
+    # Known native tokens via CoinGecko
+    if sym_upper in NATIVE_COINGECKO:
+        cg_id = NATIVE_COINGECKO[sym_upper]
+        if cg_id is None:
+            return 1.0  # stablecoin
+        pd = get_price_coingecko(cg_id)
+        if pd and pd.get("price"):
+            return float(pd["price"])
+
+    # Unknown tokens — try DexScreener with token address if we have it
+    if token_address and token_address not in ("native", "near", ""):
+        from utils.prices import get_price_dexscreener
+        dex = get_price_dexscreener(chain, token_address)
+        if dex and dex.get("price"):
+            return float(dex["price"])
+
+    # Try CoinGecko search as last resort
+    try:
+        from utils.prices import search_token
+        results = search_token(sym_upper)
+        if results:
+            pd = get_price_coingecko(results[0]["id"])
+            if pd and pd.get("price"):
+                return float(pd["price"])
+    except Exception:
+        pass
+
+    return 0.0
 
 
 def get_paper_portfolio(user_id: int) -> dict:
-    """Full paper portfolio with live USD values and unrealized PnL."""
+    """
+    Full paper portfolio with accurate USD values for ALL assets.
+    Fetches live prices for native tokens, stablecoins, and unknown tokens.
+    """
     balances = db.get_all_paper_balances(user_id)
+
+    # Also get open position addresses for DexScreener lookup
+    positions = db.get_open_positions(user_id)
+    addr_map: dict = {}  # symbol -> (chain, token_address)
+    for pos in positions:
+        sym = pos.get("token_symbol", "").upper()
+        if sym:
+            addr_map[sym] = (pos["chain"], pos["token_address"])
+
     total_usd = 0.0
     items = []
 
-    native_cg = {
-        "ETH":"ethereum","BNB":"binancecoin","MATIC":"matic-network",
-        "AVAX":"avalanche-2","SOL":"solana",
-    }
-
     for bal in balances:
-        symbol  = bal["asset"]
+        symbol  = bal["asset"].upper()
         balance = bal["balance"]
-        usd_val = 0.0
-        price   = 0.0
+        chain   = bal["chain"]
 
-        if symbol in native_cg:
-            pd = get_price_coingecko(native_cg[symbol])
-            if pd:
-                price   = pd["price"]
-                usd_val = balance * price
+        # Look up token address from open positions if available
+        chain_lookup, addr_lookup = addr_map.get(symbol, (chain, None))
+
+        price   = _get_token_usd_price(symbol, chain_lookup, addr_lookup)
+        usd_val = balance * price if price > 0 else 0.0
 
         total_usd += usd_val
         items.append({
             "symbol":    symbol,
-            "chain":     bal["chain"],
+            "chain":     chain,
             "balance":   balance,
             "price":     price,
             "usd_value": usd_val,
+            "has_price": price > 0,
         })
 
     # Add unrealized PnL from open positions
     unrealized = get_unrealized_pnl(user_id)
+    total_usd += max(0, unrealized["total_unrealized"])
 
     return {
         "items":             items,

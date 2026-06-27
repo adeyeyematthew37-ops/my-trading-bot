@@ -145,16 +145,38 @@ def _get_perp_prices(market: str, n: int) -> list:
     return [h["price"] for h in _perp_price_history.get(market, [])[-n:]]
 
 def get_perp_price(market: str) -> float | None:
-    """Get current price for a perp market."""
+    """
+    Get current price for a perp market.
+    Tries CoinGecko first, then DexScreener for each major chain as fallback.
+    """
     info = PERP_MARKETS.get(market)
     if not info:
         return None
     try:
-        from utils.prices import get_price_coingecko
+        from utils.prices import get_price_coingecko, get_price_dexscreener
+        # CoinGecko (most reliable for major assets)
         pd = get_price_coingecko(info["base"])
-        return pd["price"] if pd else None
+        if pd and pd.get("price"):
+            return float(pd["price"])
+        # DexScreener fallback — try BSC USDT pair for broad coverage
+        symbol = info["symbol"]
+        # Common USDT pair addresses for fallback
+        _FALLBACK_TOKENS = {
+            "BTC":  ("bsc", "0x7130d2A12B9BCbFAe4f2634d864A1Ee1Ce3Ead9c"),
+            "ETH":  ("bsc", "0x2170Ed0880ac9A755fd29B2688956BD959F933F8"),
+            "SOL":  ("bsc", "0x570A5D26f7765Ecb712C0924E4De545B89fD43dF"),
+            "BNB":  ("bsc", "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c"),
+            "NEAR": ("bsc", "0x1Fa4a73a3F0133f0025378af00236f3aBDEE5D63"),
+            "ARB":  ("arbitrum", "0x912CE59144191C1204E64559FE8253a0e49E6548"),
+        }
+        if symbol in _FALLBACK_TOKENS:
+            chain, addr = _FALLBACK_TOKENS[symbol]
+            dex = get_price_dexscreener(chain, addr)
+            if dex and dex.get("price"):
+                return float(dex["price"])
     except Exception:
-        return None
+        pass
+    return None
 
 
 # ─── Paper Perp Position DB helpers ──────────────────────────────────────────
@@ -766,31 +788,74 @@ def get_perp_signal(strategy_name: str, market: str,
     # ── Majority Vote ─────────────────────────────────────────────────────────
     elif strategy_name == "perp_majority_vote":
         vote = get_latest_vote(market)
-        if not vote:
-            return {"signal": "hold",
-                    "reason": "No active vote data — set up vote feed or use /vote command",
-                    "indicators": ind}
-        min_pct      = params.get("min_vote_pct", 60.0)
-        follow_crowd = params.get("follow_majority", True)
-        vote_pct     = vote["vote_pct"]
-        direction    = vote["direction"]
-        ind.update({"vote_direction": direction, "vote_pct": vote_pct})
 
-        if vote_pct < min_pct:
+        # ── Mode A: Active vote data available ────────────────────────────────
+        if vote:
+            min_pct      = params.get("min_vote_pct", 60.0)
+            follow_crowd = params.get("follow_majority", True)
+            vote_pct     = vote["vote_pct"]
+            direction    = vote["direction"]
+            ind.update({"vote_direction": direction, "vote_pct": vote_pct,
+                        "mode": "vote"})
+
+            if vote_pct >= min_pct:
+                if follow_crowd:
+                    sig = "long" if direction == "up" else "short"
+                    return {"signal": sig,
+                            "reason": f"🗳️ {vote_pct:.0f}% voted {direction} — following majority",
+                            "indicators": ind}
+                else:
+                    sig = "short" if direction == "up" else "long"
+                    return {"signal": sig,
+                            "reason": f"🗳️ Contrarian: {vote_pct:.0f}% voted {direction} — fading crowd",
+                            "indicators": ind}
             return {"signal": "hold",
-                    "reason": f"Majority {vote_pct:.0f}% — need {min_pct:.0f}% to enter",
+                    "reason": f"🗳️ Majority only {vote_pct:.0f}% — need {min_pct:.0f}% conviction",
                     "indicators": ind}
 
-        if follow_crowd:
-            sig = "long" if direction == "up" else "short"
-            return {"signal": sig,
-                    "reason": f"Following {vote_pct:.0f}% majority voting {direction}",
+        # ── Mode B: No vote — fall back to RSI + momentum hybrid ─────────────
+        # This keeps the strategy active and profitable even without manual votes
+        rsi = _rsi(prices, 14)
+        ind.update({"rsi": rsi, "mode": "auto_rsi_fallback"})
+
+        if rsi is None:
+            return {"signal": "hold",
+                    "reason": "No vote yet + building RSI history — submit a /vote or wait",
                     "indicators": ind}
-        else:
-            sig = "short" if direction == "up" else "long"
-            return {"signal": sig,
-                    "reason": f"Contrarian: {vote_pct:.0f}% voting {direction} — going opposite",
+
+        # Check if already in position
+        if strategy_id and strategy_id in _entry_prices:
+            entry = _entry_prices[strategy_id]
+            tp    = params.get("take_profit_pct", 2.0)
+            sl    = params.get("stop_loss_pct", 1.5)
+            # Determine position direction from the peak tracker
+            if strategy_id in _highest_since:
+                gain = (price - entry) / entry * 100
+                if gain >= tp:
+                    return {"signal": "close",
+                            "reason": f"Auto-RSI TP hit: +{gain:.2f}%",
+                            "indicators": ind}
+                if gain <= -sl:
+                    return {"signal": "close",
+                            "reason": f"Auto-RSI SL hit: {gain:.2f}%",
+                            "indicators": ind}
+            return {"signal": "hold",
+                    "reason": f"Auto-RSI: in position, RSI={rsi:.0f}",
                     "indicators": ind}
+
+        # No position — use RSI to find entry
+        if rsi < 25:
+            return {"signal": "long",
+                    "reason": f"Auto-RSI fallback: RSI={rsi:.0f} deeply oversold → long",
+                    "indicators": ind}
+        if rsi > 75:
+            return {"signal": "short",
+                    "reason": f"Auto-RSI fallback: RSI={rsi:.0f} deeply overbought → short",
+                    "indicators": ind}
+
+        return {"signal": "hold",
+                "reason": f"No vote + RSI={rsi:.0f} neutral — submit /vote or wait for extreme RSI",
+                "indicators": ind}
 
     # ── EMA Ribbon ────────────────────────────────────────────────────────────
     elif strategy_name == "perp_ema_ribbon":

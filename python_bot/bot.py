@@ -611,10 +611,22 @@ async def paper_trade_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             text += "_No balances yet. Use /topup to add paper funds._"
         else:
             for item in portfolio["items"]:
-                ci = CHAINS.get(item["chain"], {})
-                usd = f" (≈${item['usd_value']:.2f})" if item["usd_value"] > 0 else ""
-                text += f"{ci.get('emoji','🔗')} *{item['symbol']}*: `{item['balance']:.6f}`{usd}\n"
-            text += f"\n💵 *Total: ${portfolio['total_usd']:.2f}*"
+                ci  = CHAINS.get(item["chain"], {})
+                bal = item["balance"]
+                if item.get("usd_value", 0) > 0:
+                    usd_str = f" \(≈${item['usd_value']:.2f}\)"
+                elif not item.get("has_price", True):
+                    usd_str = " \(price N/A\)"
+                else:
+                    usd_str = ""
+                text += f"{ci.get('emoji','🔗')} *{item['symbol']}*: `{bal:.6f}`{usd_str}\n"
+            # Unrealized PnL from open positions
+            upnl = portfolio.get("unrealized_pnl", 0)
+            upnl_str = ""
+            if upnl != 0:
+                sign = "+" if upnl >= 0 else ""
+                upnl_str = f"\n📂 Unrealized P&L: `{sign}{upnl:.4f}`"
+            text += f"\n💵 *Total: ${portfolio['total_usd']:.2f}*{upnl_str}"
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data="menu:paper")]])
         await send(update, text, kb, edit=True)
 
@@ -1313,34 +1325,52 @@ async def my_strategies_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         mode_tag = "📝" if s["mode"] == "paper" else "💎"
 
         # Realized P&L from closed positions
-        realized = db.get_realized_pnl(user["id"], s["id"])
-        # Unrealized P&L from open positions
+        realized        = db.get_realized_pnl(user["id"], s["id"])
         unrealized_data = get_unrealized_pnl(user["id"], s["id"])
-        unrealized = unrealized_data["total_unrealized"]
-        total_pnl  = realized + unrealized
+        unrealized      = unrealized_data["total_unrealized"]
+        total_pnl       = realized + unrealized
 
-        pnl_emoji = "✅" if total_pnl >= 0 else "❌"
-        pnl_str   = f"{'+'if total_pnl>=0 else ''}{total_pnl:.4f}"
-        wr_str    = f"{stats['win_rate']*100:.0f}%" if stats["total_trades"] > 0 else "—"
-        logs      = get_learning_log(s["id"])
+        pnl_emoji   = "✅" if total_pnl >= 0 else "❌"
+        total_sign  = "+" if total_pnl  >= 0 else ""
+        real_sign   = "+" if realized   >= 0 else ""
+        unreal_sign = "+" if unrealized >= 0 else ""
+        wr_str      = f"{stats['win_rate']*100:.0f}%" if stats["total_trades"] > 0 else "—"
+        logs        = get_learning_log(s["id"])
         learned_str = f" 🧠x{len(logs)}" if logs else ""
 
-        # Live token data (mcap + volume)
+        # Live token data — DexScreener first, fallback to CoinGecko
         token_info = get_token_full_info(s["chain"], s["token_address"])
-        mcap_str = fmt_mcap(token_info["mcap"])    if token_info else "N/A"
-        vol_str  = fmt_mcap(token_info["volume24h"]) if token_info else "N/A"
-        price_str= fmt_price(token_info["price"])  if token_info else "N/A"
-        ch24_str = f"{'+'if(token_info or {}).get('change24h',0)>=0 else ''}{(token_info or {}).get('change24h',0):.1f}%" if token_info else ""
+        if token_info and token_info.get("price"):
+            price_str = fmt_price(token_info["price"])
+            mcap_str  = fmt_mcap(token_info["mcap"])
+            vol_str   = fmt_mcap(token_info["volume24h"])
+            ch24_val  = token_info.get("change24h", 0) or 0
+            ch24_sign = "+" if ch24_val >= 0 else ""
+            ch24_str  = f"{ch24_sign}{ch24_val:.1f}%"
+        else:
+            from trading.paper_trade import _get_token_usd_price
+            fb_price  = _get_token_usd_price(
+                s.get("token_symbol", ""), s["chain"], s["token_address"]
+            )
+            price_str = fmt_price(fb_price) if fb_price else "N/A"
+            mcap_str  = "N/A"
+            vol_str   = "N/A"
+            ch24_str  = ""
 
         text += (
             f"{status_e}{mode_tag} *{s_info.get('name', s['name'])}* \\[\\#{s['id']}\\]\n"
             f"  {ci.get('emoji','')} {ci.get('name',s['chain'])} — *{s.get('token_symbol','?')}*\n"
             f"  💵 {price_str} {ch24_str} | MCap: {mcap_str} | Vol: {vol_str}\n"
-            f"  {stats['total_trades']} trades | WR: {wr_str} | {pnl_emoji} P&L: `{pnl_str}`{learned_str}\n"
+            f"  📊 {stats['total_trades']} trades | WR: {wr_str}{learned_str}\n"
+            f"  {pnl_emoji} Total P&L: `{total_sign}{total_pnl:.4f}`\n"
+            f"    ✅ Realized: `{real_sign}{realized:.4f}`"
         )
         if unrealized_data["positions"]:
-            text += f"  📂 {len(unrealized_data['positions'])} open pos | Unrealized: `{'+'if unrealized>=0 else ''}{unrealized:.4f}`\n"
-        text += "\n"
+            open_count = len(unrealized_data["positions"])
+            text += (
+                f" | 📂 Unrealized: `{unreal_sign}{unrealized:.4f}` [{open_count} pos]"
+            )
+        text += "\n\n"
 
         row = []
         if s["status"] == "active":
@@ -2105,7 +2135,17 @@ async def _process_strategies(app: Application):
     strategies = db.get_active_strategies()
     for s in strategies:
         try:
-            params      = json.loads(s.get("params") or "{}")
+            params = json.loads(s.get("params") or "{}")
+
+            # Route perp strategies to their dedicated processor
+            if params.get("strategy_type") == "perp":
+                try:
+                    from bot.perp_handlers import process_perp_strategy
+                    await process_perp_strategy(s, params, app)
+                except Exception as pe:
+                    print(f"[PerpStrategy #{s['id']}] Error: {pe}")
+                continue
+
             signal      = get_signal(s["name"], s["chain"], s["token_address"], params, strategy_id=s["id"])
             trade_amount = params.get("trade_amount", 0.01)
             user_id      = s["user_id"]
@@ -2181,22 +2221,6 @@ async def _process_strategies(app: Application):
                                 signal_data  = signal["indicators"],
                             )
 
-                        trade_id = db.save_trade({
-                            "user_id":    user_id,
-                            "chain":      s["chain"],
-                            "trade_type": "sell",
-                            "mode":       "paper",
-                            "token_in":   s["token_address"],
-                            "token_out":  "native",
-                            "symbol_in":  token_sym,
-                            "symbol_out": ci.get("symbol",""),
-                            "amount_in":  balance * 0.9,
-                            "amount_out": result.get("received", 0),
-                            "price_at_trade": exit_price,
-                            "exit_price": exit_price,
-                            "status":     "success",
-                            "strategy":   s["name"],
-                        })
                     except Exception as ex:
                         print(f"[Strategy] Paper sell failed: {ex}")
                         continue
@@ -2204,7 +2228,8 @@ async def _process_strategies(app: Application):
             # ── Send notification & log message id for cleanup ────────────────
             msg_text = format_signal_message(
                 s["name"], signal, s.get("token_symbol","TOKEN"),
-                s["chain"], s["mode"]
+                s["chain"], s["mode"],
+                strategy_id=s["id"], user_id=s["user_id"]
             )
             try:
                 sent = await app.bot.send_message(

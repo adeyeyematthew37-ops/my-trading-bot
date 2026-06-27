@@ -467,53 +467,86 @@ async def perp_history_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ─── Background perp strategy runner ─────────────────────────────────────────
 
 async def process_perp_strategy(s: dict, params: dict, app) -> None:
-    """Called by the main background loop for perp strategies."""
+    """
+    Background processor for perpetuals strategies.
+    Called every 60s from _process_strategies in bot.py.
+    """
     market  = params.get("perp_market", "BTC-PERP")
     user_id = s["user_id"]
-    signal  = get_perp_signal(s["name"], market, params, strategy_id=s["id"])
+    tg_id   = s.get("tg_id")
+    s_info  = PERP_STRATEGIES.get(s["name"], {})
 
-    if signal["signal"] in ("long", "short"):
+    signal = get_perp_signal(s["name"], market, params, strategy_id=s["id"])
+    sig    = signal["signal"]
+
+    if sig in ("long", "short"):
         existing = get_open_perp_positions(user_id, s["id"])
         if not existing:
-            size     = params.get("size_usd", 10.0)
-            leverage = params.get("leverage", 2.0)
-            result   = paper_perp_open(user_id, market, signal["signal"],
-                                       size, leverage, strategy_id=s["id"])
-            dir_e = "📈 LONG" if signal["signal"] == "long" else "📉 SHORT"
-            s_info = PERP_STRATEGIES.get(s["name"], {})
-            msg = (
-                f"{'━'*26}\n"
-                f"🤖 *Perp Signal* \\[📝 PAPER\\]\n"
-                f"{s_info.get('emoji','📊')} *{s_info.get('name', s['name'])}*\n"
-                f"📊 {market} — {dir_e}\n"
-                f"💰 ${size:.0f} × {leverage:.0f}x\n"
-                f"📍 Entry: {fmt_price(result['entry_price'])}\n"
-                f"📝 {signal['reason']}\n"
-                f"{'━'*26}"
-            )
+            size     = float(params.get("size_usd", 10.0))
+            leverage = float(params.get("leverage", 2.0))
             try:
-                await app.bot.send_message(
-                    chat_id=s["tg_id"], text=msg, parse_mode=ParseMode.MARKDOWN
+                result = paper_perp_open(
+                    user_id, market, sig, size, leverage, strategy_id=s["id"]
                 )
-            except Exception:
-                pass
+                dir_e = "📈 LONG" if sig == "long" else "📉 SHORT"
+                msg = (
+                    f"{'━'*26}\n"
+                    f"🤖 *Perp Signal* \[📝 PAPER\]\n"
+                    f"{s_info.get('emoji','📊')} *{s_info.get('name', s['name'])}*\n"
+                    f"📊 {market} — {dir_e}\n"
+                    f"💰 ${size:.0f} × {leverage:.0f}x = ${size*leverage:.0f} notional\n"
+                    f"📍 Entry: {fmt_price(result['entry_price'])}\n"
+                    f"💧 Liq: {fmt_price(result.get('liquidation', 0))}\n"
+                    f"📝 {signal['reason']}\n"
+                    f"{'━'*26}"
+                )
+                if tg_id:
+                    try:
+                        await app.bot.send_message(
+                            chat_id=tg_id, text=msg, parse_mode=ParseMode.MARKDOWN
+                        )
+                    except Exception as ne:
+                        print(f"[PerpStrategy] Notify error: {ne}")
+            except Exception as oe:
+                print(f"[PerpStrategy #{s['id']}] Open failed: {oe}")
 
-    elif signal["signal"] == "close":
+    elif sig == "close":
+        price = get_perp_price(market)
         for pos in get_open_perp_positions(user_id, s["id"]):
-            price = get_perp_price(market) or pos["entry_price"]
-            pnl   = close_perp_position(pos["id"], price, "strategy_signal")
-            pnl_e = "✅" if pnl >= 0 else "❌"
+            exit_price = price or pos["entry_price"]
             try:
-                await app.bot.send_message(
-                    chat_id=s["tg_id"],
-                    text=f"{pnl_e} *Perp Closed*\n{market} | {signal['reason']}\nP&L: `{_perp_pnl_str(pnl)} USD`",
-                    parse_mode=ParseMode.MARKDOWN
+                pnl   = close_perp_position(pos["id"], exit_price, "strategy_signal")
+                pnl_e = "✅" if pnl >= 0 else "❌"
+                sign  = "+" if pnl >= 0 else ""
+                dir_e = "📈 LONG" if pos["direction"] == "long" else "📉 SHORT"
+                msg = (
+                    f"{pnl_e} *Perp Closed by Strategy*\n"
+                    f"{s_info.get('emoji','📊')} {s_info.get('name', s['name'])}\n"
+                    f"📊 {market} {dir_e}\n"
+                    f"📍 {fmt_price(pos['entry_price'])} → {fmt_price(exit_price)}\n"
+                    f"📝 {signal['reason']}\n"
+                    f"{pnl_e} *P&L: `{sign}{pnl:.4f} USD`*"
                 )
-            except Exception:
-                pass
+                if tg_id:
+                    try:
+                        await app.bot.send_message(
+                            chat_id=tg_id, text=msg, parse_mode=ParseMode.MARKDOWN
+                        )
+                    except Exception:
+                        pass
+            except Exception as ce:
+                print(f"[PerpStrategy #{s['id']}] Close failed: {ce}")
 
+    # Always update mark price on hold (keeps PnL current)
+    else:
+        price = get_perp_price(market)
+        if price:
+            for pos in get_open_perp_positions(user_id, s["id"]):
+                try:
+                    update_perp_pnl(pos["id"], price)
+                except Exception:
+                    pass
 
-# ─── Rhea Finance Menu ───────────────────────────────────────────────────────
 
 async def perp_rhea_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Show Rhea Finance market links."""

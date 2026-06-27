@@ -659,7 +659,12 @@ def on_trade_executed(strategy_id: int, action: str, price: float):
         _highest_since.pop(strategy_id, None)
 
 
-def format_signal_message(strategy_name, signal, token_symbol, chain, mode):
+def format_signal_message(strategy_name, signal, token_symbol, chain, mode,
+                           strategy_id=None, user_id=None):
+    """
+    Build the signal notification message.
+    Includes live PnL for the strategy if strategy_id + user_id provided.
+    """
     from config.chains import CHAINS
     sig  = signal["signal"]
     ind  = signal["indicators"]
@@ -678,14 +683,48 @@ def format_signal_message(strategy_name, signal, token_symbol, chain, mode):
         f"📡 Signal: *{sig_emoji.get(sig, sig)}*",
         f"📝 {signal['reason']}",
     ]
-    if ind.get("rsi")          is not None: lines.append(f"📉 RSI: {ind['rsi']:.1f}/100")
-    if ind.get("fast_ma")      is not None: lines.append(f"📈 Fast MA: {fmt_price(ind['fast_ma'])}")
-    if ind.get("slow_ma")      is not None: lines.append(f"📈 Slow MA: {fmt_price(ind['slow_ma'])}")
-    if ind.get("bb_upper")     is not None: lines.append(f"〰️ Bands: {fmt_price(ind['bb_lower'])} / {fmt_price(ind['bb_middle'])} / {fmt_price(ind['bb_upper'])}")
-    if ind.get("change_pct")   is not None: lines.append(f"🚀 Change: {ind['change_pct']:+.2f}%")
-    if ind.get("macd")         is not None: lines.append(f"📊 MACD: {ind['macd']:.6f}")
-    if ind.get("spike_ratio")  is not None: lines.append(f"📡 Spike: {ind['spike_ratio']:.1f}x normal")
-    if ind.get("drop_from_peak")is not None:lines.append(f"📍 From peak: {ind['drop_from_peak']:.1f}%")
+    if ind.get("rsi")           is not None: lines.append(f"📉 RSI: {ind['rsi']:.1f}/100")
+    if ind.get("fast_ma")       is not None: lines.append(f"📈 Fast MA: {fmt_price(ind['fast_ma'])}")
+    if ind.get("slow_ma")       is not None: lines.append(f"📈 Slow MA: {fmt_price(ind['slow_ma'])}")
+    if ind.get("bb_upper")      is not None: lines.append(f"〰️ Bands: {fmt_price(ind['bb_lower'])} / {fmt_price(ind['bb_middle'])} / {fmt_price(ind['bb_upper'])}")
+    if ind.get("change_pct")    is not None: lines.append(f"🚀 Change: {ind['change_pct']:+.2f}%")
+    if ind.get("macd")          is not None: lines.append(f"📊 MACD: {ind['macd']:.6f}")
+    if ind.get("spike_ratio")   is not None: lines.append(f"📡 Spike: {ind['spike_ratio']:.1f}x normal")
+    if ind.get("drop_from_peak")is not None: lines.append(f"📍 From peak: {ind['drop_from_peak']:.1f}%")
+
+    # ── Live PnL block — always shown when strategy_id is provided ────────────
+    if strategy_id is not None and user_id is not None:
+        try:
+            from utils.database import get_realized_pnl, get_open_positions
+            realized   = get_realized_pnl(user_id, strategy_id)
+            open_pos   = get_open_positions(user_id, strategy_id)
+
+            # Unrealized PnL from open positions
+            current_price = ind.get("current_price", 0)
+            unrealized = 0.0
+            open_count = 0
+            for pos in open_pos:
+                if pos.get("entry_price_usd", 0) > 0 and current_price > 0:
+                    unrealized += (current_price - pos["entry_price_usd"]) * pos.get("qty", 0)
+                    open_count += 1
+
+            total_pnl = realized + unrealized
+            pnl_e     = "✅" if total_pnl >= 0 else "❌"
+            sign      = "+" if total_pnl >= 0 else ""
+            r_sign    = "+" if realized  >= 0 else ""
+            u_sign    = "+" if unrealized>= 0 else ""
+
+            lines.append(f"")
+            lines.append(f"{'─'*20}")
+            lines.append(f"💰 *Strategy P&L*")
+            lines.append(f"  {pnl_e} Total: `{sign}{total_pnl:.4f} USD`")
+            if realized != 0:
+                lines.append(f"  ✅ Realized: `{r_sign}{realized:.4f}`")
+            if open_count > 0:
+                lines.append(f"  📂 Unrealized ({open_count} pos): `{u_sign}{unrealized:.4f}`")
+        except Exception:
+            pass  # Never crash signal delivery due to PnL lookup
+
     lines.append(f"{'━'*28}")
     return "\n".join(lines)
 
