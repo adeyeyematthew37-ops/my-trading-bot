@@ -491,7 +491,7 @@ async def process_perp_strategy(s: dict, params: dict, app) -> None:
                 dir_e = "📈 LONG" if sig == "long" else "📉 SHORT"
                 msg = (
                     f"{'━'*26}\n"
-                    f"🤖 *Perp Signal* \[📝 PAPER\]\n"
+                    f"🤖 *Perp Signal* \\[📝 PAPER\\]\n"
                     f"{s_info.get('emoji','📊')} *{s_info.get('name', s['name'])}*\n"
                     f"📊 {market} — {dir_e}\n"
                     f"💰 ${size:.0f} × {leverage:.0f}x = ${size*leverage:.0f} notional\n"
@@ -553,15 +553,15 @@ async def perp_rhea_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     text = (
         "🔥 *Rhea Finance — NEAR Perps DEX*\n\n"
-        "Rhea is the leading perpetuals DEX on NEAR Protocol\. "
-        "Connect your NEAR or HOT wallet to trade live\.\n\n"
+        "Rhea is the leading perpetuals DEX on NEAR Protocol\\. "
+        "Connect your NEAR or HOT wallet to trade live\\.\n\n"
         "*Available Markets:*\n"
     )
     rows = []
     for market, info in RHEA_MARKETS.items():
         price = get_perp_price(market)
         price_str = fmt_price(price) if price else "N/A"
-        text += f"  • *{market}*: {price_str} \(max {info['leverage_max']}x\)\n"
+        text += f"  • *{market}*: {price_str} \\(max {info['leverage_max']}x\\)\n"
         rows.append([
             InlineKeyboardButton(
                 f"📈 Trade {market} on Rhea",
@@ -570,11 +570,11 @@ async def perp_rhea_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ])
     text += (
         "\n*How to connect your wallet:*\n"
-        "1\. Open Rhea Finance link above\n"
-        "2\. Click *Connect Wallet*\n"
-        "3\. Select *NEAR Wallet*, *HOT Wallet*, or *MyNearWallet*\n"
-        "4\. Approve the connection\n\n"
-        "_Paper trade here first to test your strategy, then go live on Rhea\!_"
+        "1\\. Open Rhea Finance link above\n"
+        "2\\. Click *Connect Wallet*\n"
+        "3\\. Select *NEAR Wallet*, *HOT Wallet*, or *MyNearWallet*\n"
+        "4\\. Approve the connection\n\n"
+        "_Paper trade here first to test your strategy, then go live on Rhea\\!_"
     )
     rows.append([InlineKeyboardButton("📝 Paper Trade Instead", callback_data="perp_open:long")])
     rows.append([InlineKeyboardButton("« Back", callback_data="menu:perp")])
@@ -588,7 +588,7 @@ async def perp_orderly_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = (
         "📊 *Orderly Network — Institutional Perps*\n\n"
         "Orderly powers professional perp trading on NEAR with "
-        "deep liquidity and tight spreads\.\n\n"
+        "deep liquidity and tight spreads\\.\n\n"
         "*Markets:*\n"
     )
     rows = []
@@ -614,18 +614,18 @@ async def perp_import_wallet(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "Ⓝ *NEAR Wallet*\n"
         "Go to: Menu → Wallets → Import\n"
         "Select chain: *NEAR*\n"
-        "Paste your NEAR private key or 12\-word seed phrase\n\n"
+        "Paste your NEAR private key or 12\\-word seed phrase\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "🔥 *HOT Wallet \(HOT Chain\)*\n"
+        "🔥 *HOT Wallet \\(HOT Chain\\)*\n"
         "Go to: Menu → Wallets → Import\n"
         "Select chain: *HOT*\n"
         "HOT Wallet uses the same key as your NEAR account\n"
         "Find it in: HOT Wallet app → Settings → Export Key\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "💡 *Tip:* After importing, use paper trading first\. "
+        "💡 *Tip:* After importing, use paper trading first\\. "
         "When ready for live trading, your imported wallet "
-        "will be used automatically on Rhea\.\n\n"
-        "_Your key is encrypted with AES\-256 and never sent anywhere\._"
+        "will be used automatically on Rhea\\.\n\n"
+        "_Your key is encrypted with AES\\-256 and never sent anywhere\\._"
     )
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("👛 Go to Wallets → Import", callback_data="wallet:import")],
@@ -658,7 +658,7 @@ async def perp_market_info(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     change_str = ""
     if pd and pd.get("change24h") is not None:
         c = pd["change24h"]
-        change_str = f" \({'+'if c>=0 else ''}{c:.1f}%\)"
+        change_str = f" \\({'+'if c>=0 else ''}{c:.1f}%\\)"
 
     text = (
         f"📊 *{market}*\n\n"
@@ -693,9 +693,9 @@ async def perp_aster_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     text = (
         "⭐ *Aster Marketplace — NEAR Perps & Predictions*\n\n"
-        "Aster is a next\-gen hybrid platform combining perpetual futures "
-        "with prediction markets on NEAR Protocol\.\n"
-        "Connect your NEAR or HOT wallet and trade up to *100x* leverage\.\n\n"
+        "Aster is a next\\-gen hybrid platform combining perpetual futures "
+        "with prediction markets on NEAR Protocol\\.\n"
+        "Connect your NEAR or HOT wallet and trade up to *100x* leverage\\.\n\n"
         "*Available Markets:*\n"
     )
 
@@ -704,7 +704,7 @@ async def perp_aster_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         price     = get_perp_price(market)
         price_str = fmt_price(price) if price else "N/A"
         max_lev   = info.get("leverage_max", 50)
-        text += f"  • *{market}*: {price_str} \(max {max_lev}x\)\n"
+        text += f"  • *{market}*: {price_str} \\(max {max_lev}x\\)\n"
         rows.append([
             InlineKeyboardButton(
                 f"📈 Trade {market}", url=info["trade_url"]
@@ -716,15 +716,15 @@ async def perp_aster_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     text += (
         "\n*Two ways to use Aster:*\n"
-        "1\. 📈 *Trade* — Open long/short positions with leverage\n"
-        "2\. 🗳️ *Predict* — Vote on price direction in short rounds "
-        "\(works with the Majority Vote Sniper strategy\)\n\n"
+        "1\\. 📈 *Trade* — Open long/short positions with leverage\n"
+        "2\\. 🗳️ *Predict* — Vote on price direction in short rounds "
+        "\\(works with the Majority Vote Sniper strategy\\)\n\n"
         "*How to connect:*\n"
-        "1\. Tap any market link above\n"
-        "2\. Click *Connect Wallet* on Aster\n"
-        "3\. Choose *NEAR Wallet* or *HOT Wallet*\n"
-        "4\. Sign the connection\n\n"
-        "_Paper trade here first to practice, then go live on Aster\!_"
+        "1\\. Tap any market link above\n"
+        "2\\. Click *Connect Wallet* on Aster\n"
+        "3\\. Choose *NEAR Wallet* or *HOT Wallet*\n"
+        "4\\. Sign the connection\n\n"
+        "_Paper trade here first to practice, then go live on Aster\\!_"
     )
 
     rows.append([InlineKeyboardButton(
@@ -761,7 +761,7 @@ async def perp_market_info_v2(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if pd and pd.get("change24h") is not None:
         c = pd["change24h"]
         sign = "+" if c >= 0 else ""
-        change_str = f" \({sign}{c:.1f}%\)"
+        change_str = f" \\({sign}{c:.1f}%\\)"
 
     text = (
         f"📊 *{market}*\n\n"

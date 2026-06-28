@@ -614,9 +614,9 @@ async def paper_trade_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 ci  = CHAINS.get(item["chain"], {})
                 bal = item["balance"]
                 if item.get("usd_value", 0) > 0:
-                    usd_str = f" \(≈${item['usd_value']:.2f}\)"
+                    usd_str = f" \\(≈${item['usd_value']:.2f}\\)"
                 elif not item.get("has_price", True):
-                    usd_str = " \(price N/A\)"
+                    usd_str = " \\(price N/A\\)"
                 else:
                     usd_str = ""
                 text += f"{ci.get('emoji','🔗')} *{item['symbol']}*: `{bal:.6f}`{usd_str}\n"
@@ -678,8 +678,8 @@ async def _build_token_panel_text(chain: str, token: str, user_id: int, mode: st
             f"{'━'*28}\n"
             f"{ci.get('emoji','')} *Token Panel*\n"
             f"Chain: {ci.get('name', chain)}\n"
-            f"Contract: `{token[:12]}\.\.\. `\n\n"
-            f"⚠️ Could not fetch token data\. Check contract address\."
+            f"Contract: `{token[:12]}\\.\\.\\. `\n\n"
+            f"⚠️ Could not fetch token data\\. Check contract address\\."
         )
 
     sym      = info["base_symbol"]
@@ -731,23 +731,23 @@ async def _build_token_panel_text(chain: str, token: str, user_id: int, mode: st
             pnl_line = (
                 f"\n{pnl_e} *Unrealized P&L:* "
                 f"`{'+'if pnl_usd>=0 else ''}{pnl_usd:.4f}` "
-                f"\({'+' if pnl_pct>=0 else ''}{pnl_pct:.2f}%\)"
+                f"\\({'+' if pnl_pct>=0 else ''}{pnl_pct:.2f}%\\)"
             )
 
     text = (
         f"{'━'*28}\n"
-        f"{ci.get('emoji','')} *{name}* \| {sym} \| {mode_tag}\n\n"
+        f"{ci.get('emoji','')} *{name}* \\| {sym} \\| {mode_tag}\n\n"
         f"💵 *Price:* `{fmt_price(price)}`\n"
         f"📊 *MCap:* `{fmt_mcap(mcap)}`\n"
         f"📦 *Vol 24h:* `{fmt_mcap(vol24)}`\n"
         f"💧 *Liquidity:* `{fmt_mcap(liq)}`\n"
-        f"🔀 *DEX:* {dex} \| _{age_str}_\n\n"
+        f"🔀 *DEX:* {dex} \\| _{age_str}_\n\n"
         f"📈 *Price Change:*\n"
-        f"  5m: `{'+'if ch5m>=0 else ''}{ch5m:.2f}%` \| "
-        f"1h: `{'+'if ch1h>=0 else ''}{ch1h:.2f}%` \| "
+        f"  5m: `{'+'if ch5m>=0 else ''}{ch5m:.2f}%` \\| "
+        f"1h: `{'+'if ch1h>=0 else ''}{ch1h:.2f}%` \\| "
         f"24h: `{'+'if ch24>=0 else ''}{ch24:.2f}%`\n\n"
         f"💱 *Txns:* {buys} buys / {sells} sells — {pressure}\n\n"
-        f"👛 *Your Balance:* `{bal:.6f} {sym}` \(≈${bal_usd:.4f}\)"
+        f"👛 *Your Balance:* `{bal:.6f} {sym}` \\(≈${bal_usd:.4f}\\)"
         f"{pnl_line}\n"
         f"{'━'*28}"
     )
@@ -799,7 +799,7 @@ async def token_panel_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "Example:\n"
             "`/token solana TokenMintAddress`\n"
             "`/token ethereum 0xTokenAddress`\n\n"
-            "Opens the full trade panel with chart, rug check, buy/sell buttons\.",
+            "Opens the full trade panel with chart, rug check, buy/sell buttons\\.",
             parse_mode=ParseMode.MARKDOWN
         )
         return
@@ -812,7 +812,7 @@ async def token_panel_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     user = ensure_user(update)
-    msg  = await update.message.reply_text("⏳ Loading token data\.\.\.", parse_mode=ParseMode.MARKDOWN)
+    msg  = await update.message.reply_text("⏳ Loading token data\\.\\.\\.", parse_mode=ParseMode.MARKDOWN)
 
     text = await _build_token_panel_text(chain_key, token, user["id"], "paper")
     kb   = _token_panel_keyboard(chain_key, token, "paper")
@@ -850,7 +850,7 @@ async def rugcheck_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"🕵️ *Rug Check Report*",
         f"",
         f"{ci.get('emoji','')} Chain: {ci.get('name', chain)}",
-        f"📍 `{token[:16]}\.\.\. `",
+        f"📍 `{token[:16]}\\.\\.\\. `",
         f"",
         f"*Risk Score: {score}*",
         f"",
@@ -875,8 +875,8 @@ async def rugcheck_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     lines += [
         f"",
-        f"_Always do your own research\. "
-        f"This is not financial advice\._",
+        f"_Always do your own research\\. "
+        f"This is not financial advice\\._",
     ]
 
     kb = InlineKeyboardMarkup([[
@@ -943,7 +943,7 @@ async def tp_sell_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     bal_usd = bal * price if price > 0 else 0
     await send(update,
         f"⚫ *Sell {sym}*\n\n"
-        f"Your balance: `{bal:.6f} {sym}` \(≈${bal_usd:.4f}\)\n\n"
+        f"Your balance: `{bal:.6f} {sym}` \\(≈${bal_usd:.4f}\\)\n\n"
         f"Select % to sell:",
         InlineKeyboardMarkup(buttons), edit=True)
 
@@ -965,7 +965,7 @@ async def tp_amt_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             result = paper_buy(user["id"], chain, token, sym, amount)
             pnl_emoji = "✅"
             text = (
-                f"{pnl_emoji} *Paper Buy Executed\!*\n\n"
+                f"{pnl_emoji} *Paper Buy Executed\\!*\n\n"
                 f"{ci.get('emoji','')} {ci.get('name', chain)}\n"
                 f"💸 Spent: `{amount} {ci.get('symbol','')}`\n"
                 f"🪙 Got: `{result['received']:.6f} {sym}`\n"
@@ -973,7 +973,7 @@ async def tp_amt_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 f"💰 USD: `${result['usd_value']:.4f}`"
             )
         else:
-            text = "💎 Live buy — use /buy command for live trades\."
+            text = "💎 Live buy — use /buy command for live trades\\."
 
     except Exception as e:
         text = f"❌ Buy failed: {e}"
@@ -997,7 +997,7 @@ async def tp_sell_pct_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         bal    = db.get_paper_balance(user["id"], sym.upper(), chain)
         amount = bal * pct
         if amount <= 0:
-            await send(update, f"❌ No {sym} balance to sell\.", edit=True)
+            await send(update, f"❌ No {sym} balance to sell\\.", edit=True)
             return
 
         if mode == "paper":
@@ -1006,17 +1006,17 @@ async def tp_sell_pct_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             ppct   = result["realized_pnl_pct"]
             pnl_e  = "✅" if pnl >= 0 else "❌"
             text = (
-                f"{pnl_e} *Paper Sell Executed\!*\n\n"
+                f"{pnl_e} *Paper Sell Executed\\!*\n\n"
                 f"{ci.get('emoji','')} {ci.get('name', chain)}\n"
-                f"🪙 Sold: `{amount:.6f} {sym}` \({pct_str}%\)\n"
+                f"🪙 Sold: `{amount:.6f} {sym}` \\({pct_str}%\\)\n"
                 f"💸 Got: `{result['received']:.6f} {result['received_symbol']}`\n"
                 f"💵 Price: `{fmt_price(result['price'])}`\n\n"
                 f"{pnl_e} *Realized P&L:* "
                 f"`{'+'if pnl>=0 else ''}{pnl:.4f}` "
-                f"\(`{'+'if ppct>=0 else ''}{ppct:.2f}%`\)"
+                f"\\(`{'+'if ppct>=0 else ''}{ppct:.2f}%`\\)"
             )
         else:
-            text = "💎 Live sell — use /sell command for live trades\."
+            text = "💎 Live sell — use /sell command for live trades\\."
 
     except Exception as e:
         text = f"❌ Sell failed: {e}"
@@ -2097,7 +2097,7 @@ async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "`/token [chain] [address]` — Full trade panel with chart, buy/sell\n"
         "`/rugcheck [chain] [address]` — Rug pull risk analysis\n\n"
         "*RESET*\n"
-        "`/reset` — Selectively wipe data \(double confirmed\)\n\n"
+        "`/reset` — Selectively wipe data \\(double confirmed\\)\n\n"
         "_Use `native` as token for ETH/BNB/SOL etc_"
     )
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("« Back", callback_data="back:main")]])
