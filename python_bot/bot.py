@@ -38,6 +38,10 @@ from wallet.balances import get_native_balance, get_solana_balance
 from trading.paper_trade import (
     paper_buy, paper_sell, get_paper_portfolio, get_unrealized_pnl
 )
+from trading.live_executor import (
+    execute_live_buy, execute_live_sell, TradeNotViable, get_live_wallet
+)
+from trading.fees import calculate_trade_cost, format_fee_breakdown, get_live_gas_price_gwei
 from strategies.engine import (
     STRATEGIES, get_signal, format_signal_message,
     format_strategy_description, get_editable_params,
@@ -1063,7 +1067,9 @@ async def pbuy_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if price_data and price_data.get("base_token"):
             symbol = price_data["base_token"].get("symbol", "TOKEN")
 
-        result = paper_buy(user["id"], chain_key, token, symbol, amount)
+        result = paper_buy(user["id"], chain_key, token, symbol, amount, strategy_id=None)
+        fees = result.get("fees", {})
+        gas_warn = f"\n\n{result['gas_warning']}" if result.get("gas_warning") else ""
         await update.message.reply_text(
             f"✅ *Paper Buy Executed!*\n\n"
             f"{chain_info['emoji']} Chain: *{chain_info['name']}*\n"
@@ -1071,7 +1077,15 @@ async def pbuy_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"🪙 Received: `{result['received']:.6f} {result['received_symbol']}`\n"
             f"💵 Price: *{fmt_price(result['price'])}*\n"
             f"💰 USD Value: *${result['usd_value']:.2f}*\n\n"
-            f"_Trade ID: #{result['trade_id']}_",
+            f"⛽ *Real trading costs simulated:*\n"
+            f"  Gas: `${fees.get('gas_usd',0):.4f}`"
+            + (f" ({fees['gwei']:.1f} gwei live)" if fees.get('gwei') else "") + "\n"
+            f"  DEX fee: `${fees.get('dex_fee_usd',0):.4f}`\n"
+            f"  Slippage: `${fees.get('slippage_usd',0):.4f}`\n"
+            f"  Total cost: `${fees.get('total_cost_usd',0):.4f}` "
+            f"({fees.get('cost_pct',0):.2f}% of trade)\n\n"
+            f"_Trade ID: #{result['trade_id']}_"
+            f"{gas_warn}",
             parse_mode=ParseMode.MARKDOWN
         )
     except Exception as e:
@@ -2092,10 +2106,13 @@ async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "*🔔 ALERTS*\n"
         "`/alert [chain] [token] [above|below] [price]`\n"
         "`/alerts` — Manage alerts\n\n"
-        "*CHAINS:* ethereum bsc polygon arbitrum base avalanche solana\n\n"
+        "*CHAINS:* ethereum bsc polygon arbitrum base avalanche solana near hot\n\n"
         "*TOKEN PANEL & ANALYSIS*\n"
         "`/token [chain] [address]` — Full trade panel with chart, buy/sell\n"
         "`/rugcheck [chain] [address]` — Rug pull risk analysis\n\n"
+        "*⛽ GAS & FEES*\n"
+        "`/gas` — Live gas costs on every chain right now\n"
+        "`/gas [chain] [usd_amount]` — Check if a trade size is viable\n\n"
         "*RESET*\n"
         "`/reset` — Selectively wipe data \\(double confirmed\\)\n\n"
         "_Use `native` as token for ETH/BNB/SOL etc_"
@@ -2167,23 +2184,6 @@ async def _process_strategies(app: Application):
                             strategy_id=s["id"]
                         )
                         on_trade_executed(s["id"], "buy", entry_price)
-                        # paper_buy already calls save_trade internally
-                        if False: trade_id = db.save_trade({
-                            "user_id":    user_id,
-                            "chain":      s["chain"],
-                            "trade_type": "buy",
-                            "mode":       "paper",
-                            "token_in":   "native",
-                            "token_out":  s["token_address"],
-                            "symbol_in":  ci.get("symbol",""),
-                            "symbol_out": s.get("token_symbol","TOKEN"),
-                            "amount_in":  trade_amount,
-                            "amount_out": result.get("received", 0),
-                            "price_at_trade": entry_price,
-                            "entry_price": entry_price,
-                            "status":     "success",
-                            "strategy":   s["name"],
-                        })
                     except Exception as ex:
                         print(f"[Strategy] Paper buy failed: {ex}")
                         result = None
@@ -2202,28 +2202,97 @@ async def _process_strategies(app: Application):
                         on_trade_executed(s["id"], "sell", signal["indicators"].get("current_price", 0))
                         exit_price = signal["indicators"].get("current_price", 0)
 
-                        # Find matching buy trade to calculate PnL
-                        recent = db.get_trades(user_id, limit=50, mode="paper")
-                        buy_trade = next(
-                            (t for t in recent
-                             if t["trade_type"] == "buy"
-                             and t.get("token_out") == s["token_address"]
-                             and t.get("strategy") == s["name"]),
-                            None
-                        )
-                        if buy_trade and buy_trade.get("entry_price", 0) > 0:
+                        if result.get("realized_pnl_usd") is not None:
                             record_trade_outcome(
-                                strategy_id  = s["id"],
-                                trade_id     = buy_trade["id"],
-                                entry_price  = buy_trade["entry_price"],
-                                exit_price   = exit_price,
-                                amount       = buy_trade.get("amount_out", 0),
-                                signal_data  = signal["indicators"],
+                                strategy_id = s["id"],
+                                trade_id    = result.get("trade_id", 0),
+                                entry_price = result.get("price", exit_price),
+                                exit_price  = exit_price,
+                                amount      = balance * 0.9,
+                                signal_data = signal["indicators"],
                             )
-
                     except Exception as ex:
                         print(f"[Strategy] Paper sell failed: {ex}")
                         continue
+
+            # ── Live mode — REAL funds, gas-checked before every trade ────────
+            elif s["mode"] == "live":
+                if signal["signal"] == "buy":
+                    try:
+                        result = execute_live_buy(
+                            user_id, s["chain"], s["token_address"],
+                            s.get("token_symbol", "TOKEN"), trade_amount,
+                            strategy_id=s["id"]
+                        )
+                        on_trade_executed(s["id"], "buy", result.get("entry_price", entry_price))
+                        gas_note = (
+                            f"\n⛽ Real gas paid: ${result['actual_gas_usd']:.4f}"
+                        )
+                        result["live_note"] = gas_note
+                    except TradeNotViable as tnv:
+                        # Gas would eat too much of this trade — skip, don't burn funds
+                        print(f"[Strategy #{s['id']}] Live buy skipped: {tnv}")
+                        try:
+                            await app.bot.send_message(
+                                chat_id=s["tg_id"],
+                                text=(
+                                    f"⏸ *Live trade skipped* — gas too high right now\n"
+                                    f"{s.get('token_symbol','TOKEN')} on {s['chain']}\n"
+                                    f"{tnv}"
+                                ),
+                                parse_mode=ParseMode.MARKDOWN
+                            )
+                        except Exception:
+                            pass
+                        continue
+                    except Exception as ex:
+                        print(f"[Strategy #{s['id']}] Live buy failed: {ex}")
+                        try:
+                            await app.bot.send_message(
+                                chat_id=s["tg_id"],
+                                text=f"❌ *Live buy failed*\n{s.get('token_symbol','TOKEN')}: `{ex}`",
+                                parse_mode=ParseMode.MARKDOWN
+                            )
+                        except Exception:
+                            pass
+                        continue
+
+                elif signal["signal"] == "sell":
+                    token_sym = s.get("token_symbol", "TOKEN")
+                    wallet = get_live_wallet(user_id, s["chain"])
+                    if not wallet:
+                        continue
+                    from wallet.balances import get_erc20_balance
+                    try:
+                        bal_info = get_erc20_balance(wallet["address"], s["token_address"], s["chain"])
+                        balance  = bal_info["balance"]
+                    except Exception:
+                        balance = 0
+                    if balance <= 0:
+                        continue
+                    try:
+                        result = execute_live_sell(
+                            user_id, s["chain"], s["token_address"],
+                            token_sym, balance * 0.9,
+                            strategy_id=s["id"]
+                        )
+                        on_trade_executed(s["id"], "sell", result.get("exit_price", 0))
+                        if result.get("realized_pnl_usd") is not None:
+                            record_trade_outcome(
+                                strategy_id = s["id"],
+                                trade_id    = result.get("trade_id", 0),
+                                entry_price = result.get("exit_price", 0),
+                                exit_price  = result.get("exit_price", 0),
+                                amount      = balance * 0.9,
+                                signal_data = signal["indicators"],
+                            )
+                    except TradeNotViable as tnv:
+                        print(f"[Strategy #{s['id']}] Live sell skipped: {tnv}")
+                        continue
+                    except Exception as ex:
+                        print(f"[Strategy #{s['id']}] Live sell failed: {ex}")
+                        continue
+
 
             # ── Send notification & log message id for cleanup ────────────────
             msg_text = format_signal_message(
@@ -2231,6 +2300,15 @@ async def _process_strategies(app: Application):
                 s["chain"], s["mode"],
                 strategy_id=s["id"], user_id=s["user_id"]
             )
+
+            # Append real transaction details for live trades
+            if s["mode"] == "live" and result and result.get("tx_hash"):
+                gas_usd = result.get("actual_gas_usd", 0)
+                msg_text += (
+                    f"\n\n🔗 [View Transaction]({result['explorer_url']})"
+                    f"\n⛽ Real gas paid: `${gas_usd:.4f}`"
+                )
+
             try:
                 sent = await app.bot.send_message(
                     chat_id=s["tg_id"], text=msg_text,
@@ -2420,6 +2498,108 @@ def start_health_server():
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+#  GAS & LIQUIDITY TRANSPARENCY
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# What liquidity venue each chain's LIVE trades actually route through.
+# 1inch is tried FIRST on every EVM chain (it aggregates across many pools
+# including the one listed). If 1inch has no key configured or fails,
+# the bot falls back to the direct router shown below.
+LIQUIDITY_SOURCES = {
+    "ethereum":  {"primary": "1inch Aggregator", "fallback": "Uniswap V2", "pool_type": "AMM"},
+    "bsc":       {"primary": "1inch Aggregator", "fallback": "PancakeSwap V2", "pool_type": "AMM"},
+    "polygon":   {"primary": "1inch Aggregator", "fallback": "QuickSwap", "pool_type": "AMM"},
+    "arbitrum":  {"primary": "1inch Aggregator", "fallback": "SushiSwap", "pool_type": "AMM"},
+    "base":      {"primary": "1inch Aggregator", "fallback": "BaseSwap", "pool_type": "AMM"},
+    "avalanche": {"primary": "1inch Aggregator", "fallback": "TraderJoe", "pool_type": "AMM"},
+    "solana":    {"primary": "Jupiter Aggregator", "fallback": None,
+                 "pool_type": "Routes across Raydium, Orca, Meteora & 20+ Solana DEXs"},
+    "near":      {"primary": "Ref Finance", "fallback": "Rhea/Aster (perps)", "pool_type": "AMM"},
+    "hot":       {"primary": "Ref Finance (via NEAR)", "fallback": "Rhea/Aster (perps)", "pool_type": "AMM"},
+}
+
+
+async def gas_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """
+    /gas — Show REAL current gas costs and liquidity routing for every chain.
+    This is live RPC data fetched right now, not estimates.
+    """
+    await update.message.reply_text("⏳ Fetching live gas prices from each chain...")
+
+    lines = ["⛽ *Live Gas Costs — Right Now*\n"]
+    for chain_key, ci in CHAINS.items():
+        if ci.get("type") not in ("evm", "solana", "near"):
+            continue
+        try:
+            cost = calculate_trade_cost(chain_key, trade_size_usd=100.0)
+            liq  = LIQUIDITY_SOURCES.get(chain_key, {})
+            emoji = ci.get("emoji", "🔗")
+
+            if ci.get("type") == "evm":
+                gas_line = f"`${cost['gas_usd']:.4f}` ({cost.get('gwei',0):.1f} gwei live)"
+            else:
+                gas_line = f"`${cost['gas_usd']:.4f}` (flat fee)"
+
+            min_trade = cost.get("min_trade_usd", 0)
+            lines.append(
+                f"{emoji} *{ci['name']}*\n"
+                f"  Gas: {gas_line}\n"
+                f"  Pool: {liq.get('primary','?')}\n"
+                f"  Min viable trade: `${min_trade:.2f}`\n"
+            )
+        except Exception as e:
+            lines.append(f"{ci.get('emoji','🔗')} *{ci['name']}*: error fetching\n")
+
+    lines.append(
+        "\n_Gas is fetched live from each chain's RPC before every real trade._\n"
+        "_Trades below the minimum are automatically skipped to protect your funds._\n\n"
+        "Use `/gas [chain] [amount_usd]` to check a specific trade size."
+    )
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+
+
+async def gas_check_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """/gas [chain] [usd_amount] — Check viability of a specific trade size."""
+    args = ctx.args
+    if len(args) < 2:
+        await gas_cmd(update, ctx)
+        return
+
+    chain_key = args[0].lower()
+    try:
+        amount_usd = float(args[1])
+    except ValueError:
+        await update.message.reply_text("❌ Invalid amount. Usage: `/gas ethereum 50`",
+                                        parse_mode=ParseMode.MARKDOWN)
+        return
+
+    ci = CHAINS.get(chain_key)
+    if not ci:
+        await update.message.reply_text(f"❌ Unknown chain: {chain_key}")
+        return
+
+    await update.message.reply_text(f"⏳ Checking live gas on {ci['name']}...")
+    cost = calculate_trade_cost(chain_key, amount_usd)
+    liq  = LIQUIDITY_SOURCES.get(chain_key, {})
+
+    viable_e = "✅" if cost["viable"] else "❌"
+    text = (
+        f"⛽ *Gas Check — {ci['emoji']} {ci['name']}*\n\n"
+        f"Trade size: `${amount_usd:.2f}`\n\n"
+        f"{format_fee_breakdown(cost)}\n\n"
+        f"{viable_e} *Viable: {cost['viable']}*\n"
+    )
+    if not cost["viable"]:
+        text += f"\n⚠️ {cost['warning']}\n"
+    text += (
+        f"\n🔀 *Liquidity source:* {liq.get('primary','?')}"
+        + (f" → fallback: {liq.get('fallback')}" if liq.get("fallback") else "")
+        + f"\n📊 *Pool type:* {liq.get('pool_type','?')}"
+    )
+    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 #  MAIN
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -2544,6 +2724,7 @@ def main():
     app.add_handler(CommandHandler("report",     weekly_report_cmd))
     app.add_handler(CommandHandler("cleanup",    cleanup_cmd))
     app.add_handler(CommandHandler("reset",      reset_cmd))
+    app.add_handler(CommandHandler("gas",        gas_check_cmd))
     app.add_handler(CommandHandler("token",      token_panel_cmd))
     app.add_handler(CommandHandler("rugcheck",   rugcheck_standalone_cmd))
 

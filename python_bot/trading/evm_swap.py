@@ -61,9 +61,26 @@ def _ensure_approval(w3, signer, token_addr, spender, amount):
         w3.eth.wait_for_transaction_receipt(txh)
 
 def execute_evm_swap(chain_key: str, enc_key: str, token_in: str,
-                     token_out: str, amount_wei: int, slippage: float = 1.0) -> dict:
-    """Execute a real EVM swap. Returns {tx_hash, status}."""
+                     token_out: str, amount_wei: int, slippage: float = 1.0,
+                     skip_gas_check: bool = False) -> dict:
+    """Execute a real EVM swap. Returns {tx_hash, status}.
+
+    Before sending any transaction, this checks the REAL current gas price
+    on-chain and compares it against the trade size. If gas would eat more
+    than a sane % of the trade, it raises before spending anything —
+    so a strategy never silently bleeds out to gas on a small chain like
+    Ethereum L1.
+    """
     chain = CHAINS[chain_key]
+    if not skip_gas_check:
+        from trading.fees import calculate_trade_cost, get_native_usd_price
+        native_usd = get_native_usd_price(chain_key)
+        trade_usd  = (amount_wei / 1e18) * native_usd
+        cost = calculate_trade_cost(chain_key, trade_usd,
+                                    needs_approval=(token_in.lower() != "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE".lower()))
+        if not cost["viable"]:
+            raise ValueError(cost["warning"] or f"Trade too small for {chain_key} gas costs")
+
     w3 = get_w3(chain_key)
     signer = get_evm_signer(enc_key)
     is_native_in = token_in.lower() == NATIVE.lower()
@@ -84,7 +101,9 @@ def execute_evm_swap(chain_key: str, enc_key: str, token_in: str,
         signed = signer.sign_transaction(tx)
         txh = w3.eth.send_raw_transaction(signed.raw_transaction)
         receipt = w3.eth.wait_for_transaction_receipt(txh, timeout=120)
-        return {"tx_hash": txh.hex(), "status": "success" if receipt.status == 1 else "failed"}
+        actual_gas_native = float(Web3.from_wei(receipt.gasUsed * tx["gasPrice"], "ether"))
+        return {"tx_hash": txh.hex(), "status": "success" if receipt.status == 1 else "failed",
+                "actual_gas_native": actual_gas_native, "gas_used": receipt.gasUsed}
 
     # Fallback: direct Uniswap V2 router
     router_addr = Web3.to_checksum_address(chain["router"])
@@ -122,8 +141,10 @@ def execute_evm_swap(chain_key: str, enc_key: str, token_in: str,
     signed = signer.sign_transaction(tx)
     txh = w3.eth.send_raw_transaction(signed.raw_transaction)
     receipt = w3.eth.wait_for_transaction_receipt(txh, timeout=120)
+    actual_gas_native = float(Web3.from_wei(receipt.gasUsed * gas_price, "ether"))
     return {"tx_hash": txh.hex(), "status": "success" if receipt.status == 1 else "failed",
-            "amount_out": str(expected)}
+            "amount_out": str(expected), "actual_gas_native": actual_gas_native,
+            "gas_used": receipt.gasUsed}
 
 def send_native(chain_key: str, enc_key: str, to: str, amount_ether: float) -> dict:
     w3 = get_w3(chain_key)

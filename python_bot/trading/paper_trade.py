@@ -1,8 +1,14 @@
-# trading/paper_trade.py  —  Paper trading with real PnL tracking
+# trading/paper_trade.py  —  Paper trading with REAL costs simulated
+#
+# Every paper trade deducts the same gas + DEX fee + slippage that a live
+# trade on this chain would cost RIGHT NOW (live RPC gas price, not a
+# guess). This means: if a strategy looks profitable on paper, it has
+# already proven it can survive real trading costs on that specific chain.
 
 from utils import database as db
 from utils.prices import get_token_price, get_price_coingecko, get_token_full_info, fmt_price, fmt_mcap
 from config.chains import CHAINS
+from trading.fees import apply_paper_fees, check_gas_reserve, calculate_trade_cost
 
 
 def _get_native_usd(chain: str) -> float:
@@ -47,11 +53,19 @@ def paper_buy(user_id: int, chain: str, token_address: str, token_symbol: str,
     token_price_usd = price_data["price"]
     native_usd      = _get_native_usd(chain)
     usd_spent       = amount_native * native_usd
-    tokens_received = usd_spent / token_price_usd
+    tokens_raw      = usd_spent / token_price_usd  # before fees
+
+    # ── Apply REAL fees: same gas/DEX/slippage a live trade would pay ────────
+    gas_reserve = check_gas_reserve(user_id, chain, amount_native)
+    tokens_received, fee_breakdown = apply_paper_fees(
+        chain, tokens_raw, token_price_usd, is_buy=True
+    )
+    total_cost_usd = fee_breakdown["total_cost_usd"]
+    # ─────────────────────────────────────────────────────────────────────────
 
     # Deduct native balance
     db.subtract_paper_balance(user_id, native_symbol, chain, amount_native)
-    # Add token balance — key is always UPPER normalized symbol
+    # Add token balance (NET of fees, same as a real swap) — UPPER normalized
     db.add_paper_balance(user_id, token_symbol, chain, tokens_received)
 
     # Save trade record
@@ -72,7 +86,9 @@ def paper_buy(user_id: int, chain: str, token_address: str, token_symbol: str,
         "strategy":      str(strategy_id) if strategy_id else None,
     })
 
-    # Open a position record for PnL tracking
+    # Open position record — cost basis includes the fees just paid,
+    # so unrealized PnL reflects the TRUE breakeven point
+    effective_entry = (usd_spent + total_cost_usd) / tokens_received if tokens_received > 0 else token_price_usd
     pos_id = db.open_position({
         "user_id":         user_id,
         "strategy_id":     strategy_id,
@@ -81,9 +97,9 @@ def paper_buy(user_id: int, chain: str, token_address: str, token_symbol: str,
         "token_address":   token_address,
         "token_symbol":    token_symbol.upper(),
         "qty":             tokens_received,
-        "entry_price_usd": token_price_usd,
+        "entry_price_usd": effective_entry,
         "entry_native":    amount_native,
-        "entry_usd":       usd_spent,
+        "entry_usd":       usd_spent + total_cost_usd,
     })
 
     return {
@@ -96,6 +112,15 @@ def paper_buy(user_id: int, chain: str, token_address: str, token_symbol: str,
         "price":         token_price_usd,
         "usd_value":     usd_spent,
         "native_usd":    native_usd,
+        "fees": {
+            "gas_usd":        fee_breakdown["gas_usd"],
+            "dex_fee_usd":    fee_breakdown["dex_fee_usd"],
+            "slippage_usd":   fee_breakdown["slippage_usd"],
+            "total_cost_usd": total_cost_usd,
+            "cost_pct":       fee_breakdown["cost_pct"],
+            "gwei":           fee_breakdown.get("gwei", 0),
+        },
+        "gas_warning": gas_reserve.get("warning"),
     }
 
 
@@ -119,7 +144,15 @@ def paper_sell(user_id: int, chain: str, token_address: str, token_symbol: str,
     exit_price_usd = price_data["price"]
     native_usd     = _get_native_usd(chain)
     usd_received   = amount_tokens * exit_price_usd
-    native_received= usd_received / native_usd
+    native_raw     = usd_received / native_usd  # before fees
+
+    # ── Apply REAL sell-side fees (gas + DEX fee + slippage) ─────────────────
+    native_received, sell_fees = apply_paper_fees(
+        chain, native_raw, native_usd, is_buy=False
+    )
+    total_cost_usd   = sell_fees["total_cost_usd"]
+    usd_received_net = native_received * native_usd
+    # ─────────────────────────────────────────────────────────────────────────
 
     db.subtract_paper_balance(user_id, token_symbol.upper(), chain, amount_tokens)
     db.add_paper_balance(user_id, native_symbol, chain, native_received)
@@ -136,7 +169,9 @@ def paper_sell(user_id: int, chain: str, token_address: str, token_symbol: str,
     if matching:
         pos = matching[0]
         entry_usd = pos["entry_usd"]
-        realized_pnl_usd = usd_received - entry_usd
+        # Realized PnL = what you actually walked away with (post-fees)
+        # minus what it actually cost you to get in (post-fees, already in entry_usd)
+        realized_pnl_usd = usd_received_net - entry_usd
         realized_pnl_pct = ((exit_price_usd - pos["entry_price_usd"]) / pos["entry_price_usd"]) * 100 if pos["entry_price_usd"] > 0 else 0
         db.close_position(pos["id"], exit_price_usd, realized_pnl_usd)
 
@@ -165,10 +200,17 @@ def paper_sell(user_id: int, chain: str, token_address: str, token_symbol: str,
         "received":         native_received,
         "received_symbol":  native_symbol,
         "price":            exit_price_usd,
-        "usd_value":        usd_received,
+        "usd_value":        usd_received_net,
         "realized_pnl_usd": realized_pnl_usd,
         "realized_pnl_pct": realized_pnl_pct,
         "native_usd":       native_usd,
+        "fees": {
+            "gas_usd":        sell_fees["gas_usd"],
+            "dex_fee_usd":    sell_fees["dex_fee_usd"],
+            "slippage_usd":   sell_fees["slippage_usd"],
+            "total_cost_usd": total_cost_usd,
+            "cost_pct":       sell_fees["cost_pct"],
+        },
     }
 
 
